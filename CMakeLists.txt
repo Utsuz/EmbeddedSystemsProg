@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 
+set(PICO_CYW43_ARCH_DEFAULT pico_cyw43_arch_lwip_threadsafe_background)
+
 # Pull in SDK (must be before project)
 include(pico_sdk_import.cmake)
 include(pico_extras_import_optional.cmake)
