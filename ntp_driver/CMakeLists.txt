@@ -7,7 +7,11 @@ add_library(ntp_driver STATIC
 target_compile_definitions(ntp_driver PRIVATE
     WIFI_SSID=\"${WIFI_SSID}\"
     WIFI_PASSWORD=\"${WIFI_PASSWORD}\"
+    LWIP_SOCKET=1
+    LWIP_NETCONN=1
+    LWIP_DNS=1
     LWIP_TIMEVAL_PRIVATE=0
+    NO_SYS=0
 )
 
 # Include paths
