@@ -18,6 +18,9 @@ int bmp388_read(bmp388_sample_t *out);
  *   - temp_c_centi: int16 temperature in centi-degC (e.g., 23.45 °C -> 2345)
  * Header keeps a base start time in ms so you can reconstruct absolute times.
  */
+void dump_active_compact(void);
+void dump_backup(void);
+void dump_active_compact_bit(void);
 void     bmp388_storage_init(bool erase_all);
 int      bmp388_storage_append(uint32_t time_ms, float temperature_c);
 uint32_t bmp388_storage_count(void);
