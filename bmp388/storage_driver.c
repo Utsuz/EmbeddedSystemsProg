@@ -13,8 +13,6 @@
 #define LOG_REGION_SIZE   (128 * 1024)    /* ACTIVE region size */
 #endif
 
-#define FLASH_SECTOR_SIZE 4096
-#define FLASH_PAGE_SIZE   256
 #define LOG_MAGIC         0x424D5039u     /* 'BMP9' - compact v2 */
 #define LOG_VERSION       2u
 

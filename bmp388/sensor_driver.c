@@ -37,6 +37,7 @@ static float    g_t_low_c   = 22.0f;
 static float    g_t_high_c  = 23.5f;
 static uint32_t g_stable_needed = 1;
 static bool     g_in_excursion  = false;
+static bool     g_sensor_active = false;
 static uint32_t g_stable_count  = 0;
 
 /* Temperature calibration */
@@ -204,4 +205,37 @@ void bmp388_excursion_reset(void) {
     g_in_excursion = false;
     g_stable_count = 0;
     set_odr_if_needed(ODR_BASELINE);
+}
+
+/* Sensor control functions. Default: False */
+
+void bmp388_sensorStop(void) {
+    if (!g_ready || !g_sensor_active) return;
+
+    // 0x1B [PWR_CTRL]: bit0=press_en, bit1=temp_en, bit4=sensor_en
+    // Writing 0x00 disables measurement (standby)
+    if (i2c_reg_write_u8(BMP388_REG_PWR_CTRL, 0x00) == 0) {
+        g_sensor_active = false;
+        printf("[BMP388] Sensor stopped (standby mode).\n");
+    } else {
+        printf("[BMP388] WARN: Failed to enter standby mode!\n");
+    }
+}
+
+void bmp388_sensorStart(void) {
+    if (!g_ready) {
+        printf("[BMP388] Cannot start — sensor not initialized!\n");
+        return;
+    }
+    if (g_sensor_active) return;
+
+    // Re-enable both pressure & temperature measurements (0x33 = press+temp+sensor_en)
+    if (i2c_reg_write_u8(BMP388_REG_PWR_CTRL, 0x33) == 0) {
+        sleep_ms(50);
+        set_odr_if_needed(g_cur_odr);  // restore last known ODR (baseline or fast)
+        g_sensor_active = true;
+        printf("[BMP388] Sensor started (ODR=0x%02X).\n", g_cur_odr);
+    } else {
+        printf("[BMP388] WARN: Failed to start sensor!\n");
+    }
 }

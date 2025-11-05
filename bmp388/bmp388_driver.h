@@ -12,6 +12,10 @@ typedef struct {
 int bmp388_init(int i2c_port, uint32_t sda_pin, uint32_t scl_pin, uint8_t i2c_addr);
 int bmp388_read(bmp388_sample_t *out);
 
+/* Control Functions */
+void bmp388_sensorStart(void);
+void bmp388_sensorStop(void);
+
 /* ===== Flash logging: ultra-compact (4 bytes/record) =====
  * Record = 4 bytes:
  *   - dtime_10ms: uint16 time delta since previous sample in 10 ms units (0..65535 -> 0..655.35 s)
