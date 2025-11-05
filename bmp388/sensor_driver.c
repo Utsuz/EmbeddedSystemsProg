@@ -20,9 +20,24 @@
 #define BMP388_CMD_SOFTRESET    0xB6
 #define BMP388_REG_CALIB_T1     0x31
 
+/* ===== ODR presets (slow for baseline, fast for excursion) =====
+ * These values are practical defaults. If you have a preferred mapping
+ * from the datasheet, feel free to adjust.
+ */
+#define ODR_BASELINE  0x0A   /* slower output data rate (baseline) */
+#define ODR_FAST      0x08   /* faster output data rate (excursion) */
+
 static i2c_inst_t *g_i2c = i2c0;
 static uint8_t g_addr = 0x77;
 static bool g_ready = false;
+static uint8_t g_cur_odr = ODR_BASELINE;
+
+/* ===== Excursion detection settings (2–8 °C, 5 stable samples to recover) ===== */
+static float    g_t_low_c   = 22.0f;
+static float    g_t_high_c  = 23.5f;
+static uint32_t g_stable_needed = 1;
+static bool     g_in_excursion  = false;
+static uint32_t g_stable_count  = 0;
 
 /* Temperature calibration */
 typedef struct {
@@ -69,6 +84,44 @@ static float compensate_temperature(uint32_t t_raw) {
     return g_tcal.t_lin;
 }
 
+/* ===== ODR helper ===== */
+static void set_odr_if_needed(uint8_t odr_val) {
+    if (g_cur_odr == odr_val) return;
+    if (i2c_reg_write_u8(BMP388_REG_ODR, odr_val) == 0) {
+        g_cur_odr = odr_val;
+        printf("[BMP388] ODR set to 0x%02X (%s)\n",
+               g_cur_odr, (g_cur_odr == ODR_FAST ? "FAST" : "BASELINE"));
+        /* give sensor a moment to settle at new ODR */
+        sleep_ms(5);
+    } else {
+        printf("[BMP388] WARN: failed to set ODR=0x%02X\n", odr_val);
+    }
+}
+
+/* ===== Excursion helpers =====
+ * Returns true if state changed (entered or exited excursion)
+ */
+static bool excursion_update_from_temp(float celsius) {
+    bool prev = g_in_excursion;
+
+    if (!g_in_excursion) {
+        if (celsius < g_t_low_c || celsius > g_t_high_c) {
+            g_in_excursion = true;
+            g_stable_count = 0;
+        }
+    } else {
+        if (celsius >= g_t_low_c && celsius <= g_t_high_c) {
+            if (++g_stable_count >= g_stable_needed) {
+                g_in_excursion = false;
+                g_stable_count = 0;
+            }
+        } else {
+            g_stable_count = 0;
+        }
+    }
+    return (g_in_excursion != prev);
+}
+
 /* ==== Public sensor API (matches bmp388_driver.h) ==== */
 int bmp388_init(int i2c_port, uint32_t sda_pin, uint32_t scl_pin, uint8_t i2c_addr) {
     g_i2c  = (i2c_port == 1) ? i2c1 : i2c0;
@@ -88,7 +141,8 @@ int bmp388_init(int i2c_port, uint32_t sda_pin, uint32_t scl_pin, uint8_t i2c_ad
     i2c_reg_write_u8(BMP388_REG_CMD, BMP388_CMD_SOFTRESET);
     sleep_ms(30);
     i2c_reg_write_u8(BMP388_REG_OSR, 0x01);
-    i2c_reg_write_u8(BMP388_REG_ODR, 0x09);
+    i2c_reg_write_u8(BMP388_REG_ODR, ODR_BASELINE);  // start in baseline ODR
+    g_cur_odr = ODR_BASELINE;
     i2c_reg_write_u8(BMP388_REG_PWR_CTRL, 0x33);
     sleep_ms(50);
 
@@ -117,5 +171,37 @@ int bmp388_read(bmp388_sample_t *out) {
     if (t_raw == 0) return -5;
 
     out->temperature_c = compensate_temperature(t_raw);
+
+    /* Update excursion state on every reading */
+    bool changed = excursion_update_from_temp(out->temperature_c);
+    if (changed) {
+        if (g_in_excursion) {
+            printf("** EXCURSION detected (T=%.2f °C). Using FAST ODR. **\n", out->temperature_c);
+            set_odr_if_needed(ODR_FAST);
+        } else {
+            printf("** RECOVERY to normal range (T=%.2f °C). Using BASELINE ODR. **\n", out->temperature_c);
+            set_odr_if_needed(ODR_BASELINE);
+        }
+    }
+
     return 0;
+}
+
+/* ===== Optional public helpers (add prototypes to bmp388_driver.h if needed) =====
+   void bmp388_excursion_config(float t_low_c, float t_high_c, uint32_t stable_samples);
+   bool bmp388_excursion_state(void);
+   void bmp388_excursion_reset(void);
+*/
+void bmp388_excursion_config(float t_low_c, float t_high_c, uint32_t stable_samples) {
+    g_t_low_c = t_low_c;
+    g_t_high_c = t_high_c;
+    g_stable_needed = (stable_samples == 0) ? 1 : stable_samples;
+}
+bool bmp388_excursion_state(void) {
+    return g_in_excursion;
+}
+void bmp388_excursion_reset(void) {
+    g_in_excursion = false;
+    g_stable_count = 0;
+    set_odr_if_needed(ODR_BASELINE);
 }

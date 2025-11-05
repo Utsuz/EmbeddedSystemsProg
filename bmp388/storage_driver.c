@@ -31,6 +31,23 @@
 #define LOG_XIP_BASE         (XIP_BASE + LOG_FLASH_OFFSET)
 #define BACKUP_XIP_BASE      (XIP_BASE + BACKUP_FLASH_OFFSET)
 
+/* ==== Excursion detection (no on-flash format change) ==== */
+#ifndef EXCUR_T_LOW_C
+#define EXCUR_T_LOW_C   22.0f
+#endif
+#ifndef EXCUR_T_HIGH_C
+#define EXCUR_T_HIGH_C  23.5f
+#endif
+
+static inline bool is_excursion(float c) {
+    return (c < EXCUR_T_LOW_C) || (c > EXCUR_T_HIGH_C);
+}
+
+/* Put near top with the others */
+#define OPC_TS   0xF0  /* timestamp marker (existing) */
+#define OPC_E    0xE5  /* NEW: inline 'e' marker on excursion state flip */
+#define OPC_END  0xEE  /* end marker (existing) */
+
 /* 4-byte compact record: dtime(10ms) + temp(centi-degC) */
 typedef struct __attribute__((packed)) {
     uint16_t dtime_10ms;
@@ -368,20 +385,51 @@ void dump_active_compact(void) {
     uint32_t n = bmp388_storage_count();
     if (n == 0) { printf("# no ACTIVE records\n"); return; }
 
+    bool have_prev      = false;   // have we printed at least one sample?
+    bool prev_exc       = false;   // previous excursion state (valid only if have_prev)
+    bool first_in_block = true;    // comma control within the current 50-sample block
+
     for (uint32_t i = 0; i < n; i++) {
         uint32_t t_ms; float temp;
         if (bmp388_storage_read(i, &t_ms, &temp) != 0) continue;
 
-        if ((i % 50) == 0) printf("\n*timestamp* %lu\n", (unsigned long)t_ms);
-        int b = bucket_5(temp);
-        printf("%d", b);
+        // Block header every 50 samples (DON'T reset excursion state)
+        if ((i % 50) == 0) {
+            printf("\n*timestamp* %lu\n", (unsigned long)t_ms);
+            first_in_block = true;  // only for commas
+        }
 
-        bool is_last = (i == (n - 1));
-        bool end_of_block = ((i % 50) == 49);
-        if (!is_last && !end_of_block) printf(",");
+        bool exc = is_excursion(temp);
+        int  b   = bucket_5(temp);
+
+        if (!have_prev) {
+            // First sample of the whole dump: no 'e' at start by requirement
+            if (!first_in_block) printf(",");
+            printf("%d", b);
+            first_in_block = false;
+
+            have_prev = true;
+            prev_exc  = exc;  // establish baseline state for later transitions
+            continue;
+        }
+
+        // Emit 'e' exactly when excursion state flips (normal<->excursion)
+        if (exc != prev_exc) {
+            if (!first_in_block) printf(",");
+            printf("e");
+            first_in_block = false;
+            prev_exc = exc;  // update state AFTER marking the transition
+        }
+
+        // Emit current bucket
+        if (!first_in_block) printf(",");
+        printf("%d", b);
+        first_in_block = false;
     }
     printf("\n");
 }
+
+
 
 /* Binary, masked, timestamp-every-50 compact dump (3-bit buckets) */
 static uint8_t temp_to_bucket5(float temp) {
@@ -391,42 +439,65 @@ static uint8_t temp_to_bucket5(float temp) {
     if (temp < 28.0f) return 3;
     return 4;
 }
+/* Binary, masked, timestamp-every-50 compact dump WITH inline 'e' markers */
+#define OPC_TS   0xF0  // timestamp
+#define OPC_E    0xE5  // inline 'e' toggle
+#define OPC_END  0xEE  // end
+
+#define OPC_TS   0xF0
+#define OPC_E    0xE5
+#define OPC_END  0xEE
+
 void dump_active_compact_bit(void) {
     uint32_t n = bmp388_storage_count();
 
-    /* header */
-    putchar_raw(0xC1);
-    putchar_raw(0x01);
+    putchar_raw(0xC1); putchar_raw(0x01);
     putchar_raw((uint8_t)(n & 0xFF));
     putchar_raw((uint8_t)(n >> 8));
     putchar_raw(0x05);
 
-    uint8_t cur = 0;
-    int bits = 0;
+    uint8_t cur = 0; int bits = 0;
+    bool have_prev = false, prev_exc = false;
 
     for (uint32_t i = 0; i < n; i++) {
         uint32_t t_ms; float temp;
         if (bmp388_storage_read(i, &t_ms, &temp) != 0) continue;
 
+        // Timestamp every 50 samples (byte-aligned)
         if ((i % 50) == 0) {
             if (bits > 0) { putchar_raw(cur); cur = 0; bits = 0; }
-            putchar_raw(0xF0);
-            putchar_raw((uint8_t)(t_ms & 0xFF));
-            putchar_raw((uint8_t)((t_ms >> 8) & 0xFF));
-            putchar_raw((uint8_t)((t_ms >> 16) & 0xFF));
-            putchar_raw((uint8_t)((t_ms >> 24) & 0xFF));
+            putchar_raw(OPC_TS);
+            putchar_raw((uint8_t)(t_ms)); putchar_raw((uint8_t)(t_ms>>8));
+            putchar_raw((uint8_t)(t_ms>>16)); putchar_raw((uint8_t)(t_ms>>24));
+
+            // NEW: if we were already in excursion, emit a reminder 'e' opcode
+            if (have_prev && prev_exc) {
+                // already byte-aligned
+                putchar_raw(OPC_E);
+            }
+        }
+
+        bool exc = (temp < 2.0f) || (temp > 8.0f);
+
+        if (!have_prev) {
+            have_prev = true;
+            prev_exc  = exc;    // no 'e' at very start
+        } else if (exc != prev_exc) {
+            if (bits > 0) { putchar_raw(cur); cur = 0; bits = 0; }
+            putchar_raw(OPC_E);
+            prev_exc = exc;
         }
 
         uint8_t b = temp_to_bucket5(temp) & 0x07;
         cur |= (uint8_t)(b << bits);
         bits += 3;
-
         if (bits >= 8) {
             putchar_raw(cur);
             bits -= 8;
             cur = (bits > 0) ? (uint8_t)(b >> (3 - bits)) : 0;
         }
     }
+
     if (bits > 0) putchar_raw(cur);
-    putchar_raw(0xEE);
+    putchar_raw(OPC_END);
 }
