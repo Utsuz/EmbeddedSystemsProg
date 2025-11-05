@@ -1,52 +1,25 @@
-cmake_minimum_required(VERSION 3.12)
+add_executable(bmp388
+    bmp388.c
+    sensor_driver.c       # NEW: sensor-only module
+    storage_driver.c      # NEW: storage-only module
+    bmp388_driver.h
+)
 
-set(PICO_CYW43_ARCH_DEFAULT pico_cyw43_arch_lwip_threadsafe_background)
+target_include_directories(bmp388 PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(bmp388
+    pico_stdlib
+    hardware_i2c
+    hardware_adc
+)
 
-# Pull in SDK (must be before project)
-include(pico_sdk_import.cmake)
-include(pico_extras_import_optional.cmake)
+pico_enable_stdio_usb(bmp388 1)
+pico_enable_stdio_uart(bmp388 0)
+target_compile_definitions(bmp388 PRIVATE
+    PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=3000
+    PICO_STDIO_USB_LOW_POWER_IDLE_TIMEOUT_MS=0
+)
+pico_add_extra_outputs(bmp388)
 
-set(FREERTOS_KERNEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel")
-include(${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS_Kernel_import.cmake)
-
-project(TempSensor C CXX ASM)
-
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
-set(PICO_BOARD pico_w)
-
-if (PICO_SDK_VERSION_STRING VERSION_LESS "2.2.0")
-    message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.2.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
-endif()
-
-# If you want debug output from USB (pass -DPICO_STDIO_USB=1) this ensures you don't lose any debug output while USB is set up
-if (NOT DEFINED PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS)
-    set(PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS 3000)
-endif()
-
-# Initialize the SDK
-pico_sdk_init()
-
-# Wifi (2.4 GHz only)
-if (NOT DEFINED WIFI_SSID)
-    set(WIFI_SSID "Twa...") # Set your own SSID
-endif()
-
-if (NOT DEFINED WIFI_PASSWORD)
-    set(WIFI_PASSWORD "T0waMajiTenshi!") # Set your own Password
-endif()
-
-add_compile_options(-Wall
-        -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
-        -Wno-unused-function # we have some for the docs that aren't called
-        )
-if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    add_compile_options(-Wno-maybe-uninitialized)
-endif()
-
-# Hardware-specific examples in subdirectories:
-add_subdirectory(main)
-add_subdirectory(bmp388)
-add_subdirectory(ntp_driver)
-add_subdirectory(usb)
-add_subdirectory(HMAC_SHA256)
+# optional: tiny log region + faster sampling while testing
+target_compile_definitions(bmp388 PRIVATE LOG_REGION_SIZE=8192)
+target_compile_definitions(bmp388 PRIVATE SAMPLE_PERIOD_MS=200)
