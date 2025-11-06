@@ -40,4 +40,6 @@ void     bmp388_storage_rotate_to_backup(void);        /* Force rotation: copy A
 uint32_t bmp388_backup_count(void);                    /* Number of records in BACKUP (0 if none) */
 int      bmp388_backup_read(uint32_t index, uint32_t *out_ms, float *out_temp);  /* Read a record from BACKUP */
 void     bmp388_backup_clear(void);                    /* Erase BACKUP region */
+
+void dump_active(void);
 #endif

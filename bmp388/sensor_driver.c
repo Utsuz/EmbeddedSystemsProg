@@ -34,11 +34,12 @@ static uint8_t g_cur_odr = ODR_BASELINE;
 
 /* ===== Excursion detection settings (2–8 °C, 5 stable samples to recover) ===== */
 static float    g_t_low_c   = 22.0f;
-static float    g_t_high_c  = 23.5f;
-static uint32_t g_stable_needed = 1;
+static float    g_t_high_c  = 24.5f;
+static uint32_t g_stable_needed = 0;
 static bool     g_in_excursion  = false;
-static bool     g_sensor_active = false;
 static uint32_t g_stable_count  = 0;
+
+static bool     g_sensor_active = false;
 
 /* Temperature calibration */
 typedef struct {
@@ -188,11 +189,6 @@ int bmp388_read(bmp388_sample_t *out) {
     return 0;
 }
 
-/* ===== Optional public helpers (add prototypes to bmp388_driver.h if needed) =====
-   void bmp388_excursion_config(float t_low_c, float t_high_c, uint32_t stable_samples);
-   bool bmp388_excursion_state(void);
-   void bmp388_excursion_reset(void);
-*/
 void bmp388_excursion_config(float t_low_c, float t_high_c, uint32_t stable_samples) {
     g_t_low_c = t_low_c;
     g_t_high_c = t_high_c;
