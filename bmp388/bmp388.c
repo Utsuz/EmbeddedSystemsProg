@@ -42,7 +42,7 @@ int main(void) {
     gpio_init(BTN_SHOW);   gpio_pull_up(BTN_SHOW);
     gpio_init(BTN_TOGGLE); gpio_pull_up(BTN_TOGGLE);
 
-    bool prev_backup = true;
+    // bool prev_backup = true;
     bool prev_show   = true;
     bool prev_toggle = true;
     bool sensor_active = true;
@@ -60,7 +60,8 @@ int main(void) {
         // if (c == 'B' || c == 'b') dump_backup();
         // if (c == 'R' || c == 'r') { bmp388_storage_rotate_to_backup(); printf("Rotated ACTIVE -> BACKUP.\n"); }
         // if (c == 'X' || c == 'x') { bmp388_backup_clear(); printf("BACKUP cleared.\n"); }
-        // if (c == 'C' || c == 'c') print_counts();
+        // if (c == 'S' || c == 's') bmp388_backup_compact_save();
+        // if (c == 'B' || c == 'b') dump_backup_compact_raw();
         if (c == 'A' || c == 'a') dump_active_compact_bit();
 
         /* --- periodic sample + append to ACTIVE --- */

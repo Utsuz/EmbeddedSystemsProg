@@ -15,9 +15,9 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(PICO_BOARD pico_w)
 
-if (PICO_SDK_VERSION_STRING VERSION_LESS "2.2.0")
-    message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.2.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
-endif()
+# if (PICO_SDK_VERSION_STRING VERSION_LESS "2.2.0")
+#     message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.2.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
+# endif()
 
 # If you want debug output from USB (pass -DPICO_STDIO_USB=1) this ensures you don't lose any debug output while USB is set up
 if (NOT DEFINED PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS)
@@ -48,5 +48,10 @@ endif()
 add_subdirectory(main)
 add_subdirectory(bmp388)
 add_subdirectory(ntp_driver)
+add_subdirectory(activation_driver)
+add_subdirectory(master_pico)
+add_subdirectory(slave_pico)
 add_subdirectory(usb)
+add_subdirectory(uart_driver)
 add_subdirectory(HMAC_SHA256)
+

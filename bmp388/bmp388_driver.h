@@ -25,6 +25,10 @@ void bmp388_sensorStop(void);
 void dump_active_compact(void);
 void dump_backup(void);
 void dump_active_compact_bit(void);
+void bmp388_backup_compact_save(void);
+void dump_backup_compact_raw(void);
+
+
 void     bmp388_storage_init(bool erase_all);
 int      bmp388_storage_append(uint32_t time_ms, float temperature_c);
 uint32_t bmp388_storage_count(void);
