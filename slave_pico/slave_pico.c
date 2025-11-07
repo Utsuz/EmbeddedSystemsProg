@@ -1,8 +1,12 @@
+
 #include "pico/stdlib.h"
 #include "activation_driver.h"
 #include "uart_driver.h"
+
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
+#include <time.h>
 
 #define UART_PORT_NUM   1
 #define UART_TX_PIN     8
@@ -10,7 +14,11 @@
 #define UART_BAUDRATE   115200
 #define BTN_PIN         20
 
-typedef enum { STATE_HANDSHAKE, STATE_IDLE, STATE_WAIT_TIME } comm_state_t;
+typedef enum {
+    STATE_HANDSHAKE,
+    STATE_IDLE,
+    STATE_WAIT_TIME
+} comm_state_t;
 
 static uint64_t simulated_times[5];
 static int time_count = 0;
@@ -30,7 +38,8 @@ int main() {
 
     while (1) {
         switch (state) {
-            // --- HANDSHAKE PHASE ---
+
+            // HANDSHAKE PHASE
             case STATE_HANDSHAKE:
                 if (activation_receive_line(recv_buf, sizeof(recv_buf))) {
                     if (strncmp(recv_buf, "HELLO", 5) == 0) {
@@ -41,7 +50,7 @@ int main() {
                 }
                 break;
 
-            // --- IDLE PHASE ---
+            // IDLE PHASE
             case STATE_IDLE:
                 // Button pressed → Request time
                 if (!gpio_get(BTN_PIN)) {
@@ -57,13 +66,13 @@ int main() {
                         if (time_count > 0) {
                             for (int i = 0; i < time_count; i++) {
                                 char msg[64];
-                                snprintf(msg, sizeof(msg), "DATA %llu\n", simulated_times[i]);
+                                snprintf(msg, sizeof(msg), "DATA %" PRIu64 "\n", simulated_times[i]);
                                 activation_send(msg);
                                 sleep_ms(200);
                             }
                             activation_send("DONE\n");
                             printf("[Slave] Sent DONE\n");
-                            time_count = 0;
+                            time_count = 0; // reset after sending
                         } else {
                             printf("[Slave] No data stored, ignoring GET_DATA\n");
                             activation_send("ACK_EMPTY\n");
@@ -74,7 +83,7 @@ int main() {
                 }
                 break;
 
-            // --- WAITING FOR TIME PHASE ---
+            // WAITING FOR TIME PHASE
             case STATE_WAIT_TIME: {
                 absolute_time_t deadline = make_timeout_time_ms(5000);
                 bool got_time = false;
@@ -82,18 +91,28 @@ int main() {
                 while (!got_time && absolute_time_diff_us(get_absolute_time(), deadline) > 0) {
                     if (activation_receive_line(recv_buf, sizeof(recv_buf))) {
                         uint64_t base_time = 0;
-                        if (sscanf(recv_buf, "TIME %llu", &base_time) == 1) {
-                            printf("[Slave] Received time: %llu\n", base_time);
 
-                            // Simulate 5 increments
+                        // Parse "TIME <unix_epoch>"
+                        if (sscanf(recv_buf, "TIME %" SCNu64, &base_time) == 1) {
+                            printf("[Slave] Received Unix time: %" PRIu64 "\n", base_time);
+
+                            // Optional: show human-readable time
+                            time_t t = (time_t) base_time;
+                            printf("[Slave] Human time: %s", ctime(&t));
+
+                            // Reset and simulate 5 increments
+                            time_count = 0;
                             for (int i = 0; i < 5; i++) {
-                                simulated_times[i] = base_time + (i + 1) * 1000;
-                                printf("[Slave] Simulated %llu\n", simulated_times[i]);
+                                simulated_times[i] = base_time + (i + 1); // 1s increments
+                                printf("[Slave] Simulated %" PRIu64 " (+%ds)\n", simulated_times[i], i + 1);
                                 sleep_ms(1000);
+                                time_count++;
                             }
-                            time_count = 5;
+
                             got_time = true;
                             state = STATE_IDLE;
+                        } else {
+                            printf("[Slave] Failed to parse TIME string: %s\n", recv_buf);
                         }
                     }
                     sleep_ms(50);
@@ -109,4 +128,3 @@ int main() {
         sleep_ms(50);
     }
 }
-
