@@ -1,6 +1,4 @@
-// storage_driver.c — ACTIVE logging only + NEW binary compact dump (reads from RAM mirror, not storage)
-// - Removes BACKUP and all old/text dump methods
-// - Keeps ACTIVE storage (append) but dump_active_compact_bit() now uses an in-RAM log (no bmp388_storage_read())
+// storage_driver.c — ACTIVE logging + shared compact-bit stream (UART/Flash)
 
 #include "bmp388_driver.h"
 #include "pico/stdlib.h"
@@ -13,112 +11,56 @@
 
 /* ===== Tunables ===== */
 #ifndef LOG_REGION_SIZE
-#define LOG_REGION_SIZE   (128 * 1024)    /* size of ACTIVE log region */
+#define LOG_REGION_SIZE      (256 * 1024)  /* ACTIVE region size (end of flash) */
 #endif
 
-/* On-flash header signature */
-#define LOG_MAGIC         0x424D5039u     /* 'BMP9' */
-#define LOG_VERSION       2u
-
-#ifndef PICO_FLASH_SIZE_BYTES
-#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#ifndef RAMLOG_CAP
+#define RAMLOG_CAP           2048          /* mirror buffer for robust dumps */
 #endif
 
-/* Flash layout (ACTIVE only at end of flash)
- * [ ... firmware ... ][ ACTIVE (LOG_REGION_SIZE) ]
+/* ===== Record format (on flash) =====
+ * Fixed 4-byte records: [dtime_10ms:u16][temp_c_centi:i16]
  */
-#define LOG_FLASH_OFFSET  (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE) /* ACTIVE base */
-#define LOG_XIP_BASE      (XIP_BASE + LOG_FLASH_OFFSET)
-
-/* ===== Excursion thresholds (toggle markers in binary dump) ===== */
-#ifndef EXCUR_T_LOW_C
-#define EXCUR_T_LOW_C   22.0f
-#endif
-#ifndef EXCUR_T_HIGH_C
-#define EXCUR_T_HIGH_C  24.5f
-#endif
-static inline bool is_excursion(float c) { return (c < EXCUR_T_LOW_C) || (c > EXCUR_T_HIGH_C); }
-
-/* ===== Opcodes for binary compact dump ===== */
-#define OPC_TS   0xF0  /* timestamp marker (we emit ONLY ONCE at start) */
-#define OPC_E    0xE5  /* excursion toggle opcode */
-#define OPC_END  0xEE  /* end marker */
-
-/* ===== 4-byte compact record (delta-time + temperature) for ACTIVE storage ===== */
 typedef struct __attribute__((packed)) {
-    uint16_t dtime_10ms;     /* elapsed time since previous record, in 10 ms units */
-    int16_t  temp_c_centi;   /* temperature in centi-degC */
+    uint16_t dtime_10ms;
+    int16_t  temp_c_centi;
 } log_rec4_t;
 
-#define RECORD_SIZE       ((uint32_t)sizeof(log_rec4_t))
-#define RECORDS_PER_PAGE  (FLASH_PAGE_SIZE / RECORD_SIZE)
-
-/* Header (first page in region) */
+/* ===== ACTIVE region header ===== */
 typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t capacity_bytes;   /* bytes for data (excl. header page) */
-    uint32_t count;            /* number of records */
-    uint32_t base_time_ms;     /* absolute ms for record #0 */
-    uint32_t reserved32[7];    /* pad; remainder of the page is 0xFF */
+    uint32_t magic;      /* 'LOG1' */
+    uint32_t count;      /* number of valid records */
 } log_header_t;
 
-/* ===== Runtime state for ACTIVE ===== */
-static log_header_t g_hdr;
-static uint8_t  g_page_buf[FLASH_PAGE_SIZE];
-static uint32_t g_page_fill = 0;     /* bytes in current RAM page */
-static uint32_t g_write_pos = 0;     /* bytes written to data area */
-static uint32_t g_last_time_ms = 0;
-static bool     g_have_anchor = false;
+#define LOG_MAGIC 0x31474F4Cu /* 'LOG1' */
 
-/* ===== NEW: In-RAM mirror log (used by dumper; avoids bmp388_storage_read) =====
-   Choose a capacity that suits your RAM budget. If it fills, it overwrites oldest (ring). */
-#ifndef RAMLOG_CAP
-#define RAMLOG_CAP  8192u   /* number of samples kept in RAM */
-#endif
-
-typedef struct {
-    uint32_t t_ms[RAMLOG_CAP];
-    float    temp[RAMLOG_CAP];
-    uint32_t head;   /* index of oldest element */
-    uint32_t count;  /* # of valid elements (<= RAMLOG_CAP) */
-} ramlog_t;
-
-static ramlog_t g_ramlog = {0};
-
-static inline void ramlog_clear(void) {
-    g_ramlog.head = 0;
-    g_ramlog.count = 0;
-}
-
-static inline void ramlog_add(uint32_t t_ms, float temp) {
-    uint32_t pos;
-    if (g_ramlog.count < RAMLOG_CAP) {
-        pos = (g_ramlog.head + g_ramlog.count) % RAMLOG_CAP;
-        g_ramlog.count++;
-    } else {
-        /* overwrite oldest */
-        pos = g_ramlog.head;
-        g_ramlog.head = (g_ramlog.head + 1) % RAMLOG_CAP;
-    }
-    g_ramlog.t_ms[pos] = t_ms;
-    g_ramlog.temp[pos] = temp;
-}
-
-static inline uint32_t ramlog_count(void) {
-    return g_ramlog.count;
-}
-
-/* Get ith element in chronological order: i=0 oldest ... i=count-1 newest */
-static inline void ramlog_get(uint32_t i, uint32_t *t_ms, float *temp) {
-    uint32_t pos = (g_ramlog.head + i) % RAMLOG_CAP;
-    if (t_ms) *t_ms = g_ramlog.t_ms[pos];
-    if (temp) *temp = g_ramlog.temp[pos];
-}
+/* Flash/XIP layout */
+#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#define LOG_FLASH_OFFSET      (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE)
+#define LOG_XIP_BASE          (XIP_BASE + LOG_FLASH_OFFSET)
 
 /* ===== XIP helpers ===== */
 static inline const log_header_t *xip_hdr_active(void)   { return (const log_header_t *)(LOG_XIP_BASE); }
 static inline const uint8_t      *xip_data_active(void)  { return (const uint8_t *)(LOG_XIP_BASE + FLASH_PAGE_SIZE); }
+
+/* ===== Compact-bit blob region (for saving dump_active_compact_bit output) ===== */
+#ifndef COMPACT_REGION_SIZE
+#define COMPACT_REGION_SIZE   (32 * 1024)  /* adjust if you need more/less */
+#endif
+#define COMPACT_FLASH_OFFSET  (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE - COMPACT_REGION_SIZE)
+#define COMPACT_XIP_BASE      (XIP_BASE + COMPACT_FLASH_OFFSET)
+#define CB_MAGIC  0x43424954u /* 'CBIT' */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;   /* CB_MAGIC */
+    uint32_t length;  /* number of valid bytes in 'data' */
+    uint8_t  reserved[FLASH_PAGE_SIZE - 8]; /* pad to 1 page */
+} compact_hdr_t;
+static inline const compact_hdr_t *xip_hdr_compact(void) {
+    return (const compact_hdr_t *)(COMPACT_XIP_BASE);
+}
+static inline const uint8_t *xip_data_compact(void) {
+    return (const uint8_t *)(COMPACT_XIP_BASE + FLASH_PAGE_SIZE);
+}
 
 /* ===== Flash helpers ===== */
 static void flash_program_block(uint32_t flash_off, const void *data, size_t len) {
@@ -131,202 +73,256 @@ static void flash_erase_sectors(uint32_t flash_off, size_t len) {
     flash_range_erase(flash_off, len);
     restore_interrupts(irq);
 }
-static void write_header_to_flash_active(const log_header_t *h) {
-    uint8_t page[FLASH_PAGE_SIZE];
-    memset(page, 0xFF, sizeof page);
-    memcpy(page, h, sizeof *h);
-    flash_program_block(LOG_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
+
+/* ===== ACTIVE in-RAM mirror for robust dumping ===== */
+typedef struct {
+    uint32_t t_ms[RAMLOG_CAP];
+    float    temp[RAMLOG_CAP];
+    uint32_t head;    /* oldest index */
+    uint32_t count;   /* number of valid items (<= RAMLOG_CAP) */
+} ramlog_t;
+
+static struct {
+    log_header_t hdr;         /* cached header */
+    uint32_t     write_pos;   /* byte offset after header where next record goes */
+    uint8_t      page_buf[FLASH_PAGE_SIZE];
+    uint32_t     page_fill;
+    uint32_t     last_time_ms;
+} g;
+
+static ramlog_t g_ram = { .head = 0, .count = 0 };
+
+/* ===== Bucket & compact opcodes ===== */
+#define OPC_TS   0xF0
+#define OPC_E    0xE5
+#define OPC_END  0xEE
+
+/* ===== Bucket mapper: 0.5 °C buckets centered at 22.5..28.0.. =====
+ * 0..12 covering [22.25, 28.25], clamp outside.
+ */
+static inline uint8_t bucket_0p5_22_28(float t) {
+    float f = (t - 22.5f) * 2.0f + 1.0f;  /* 22.5->1, 23.0->2, 23.5->3 ... */
+    int b = (int)(f + 0.0f);
+    if (b < 0) b = 0;
+    if (b > 12) b = 12;
+    return (uint8_t)b;
 }
 
-/* ===== ACTIVE init / erase ===== */
-static void storage_reset_state_after_erase(void) {
-    memset(&g_hdr, 0, sizeof g_hdr);
-    g_hdr.magic          = LOG_MAGIC;
-    g_hdr.version        = LOG_VERSION;
-    g_hdr.capacity_bytes = LOG_REGION_SIZE - FLASH_PAGE_SIZE; /* first page is header */
-    g_hdr.count          = 0;
-    g_hdr.base_time_ms   = 0;
+/* Simple excursion detector; adjust to your policy */
+static inline bool is_excursion(float t) { return (t < 23.0f || t > 24.5f); }
 
-    g_write_pos    = 0;
-    g_page_fill    = 0;
-    g_last_time_ms = 0;
-    g_have_anchor  = false;
-
-    memset(g_page_buf, 0xFF, sizeof g_page_buf);
-    write_header_to_flash_active(&g_hdr);
-
-    /* Also clear the RAM log */
-    ramlog_clear();
-}
-
-void bmp388_storage_erase_all(void) {
-    flash_erase_sectors(LOG_FLASH_OFFSET, LOG_REGION_SIZE);
-    storage_reset_state_after_erase();
-}
-
-void bmp388_storage_init(bool erase_all) {
+/* ===== ACTIVE header/cache ===== */
+static void hdr_load_or_init(void) {
     const log_header_t *h = xip_hdr_active();
-    bool ok = (h->magic == LOG_MAGIC) && (h->version == LOG_VERSION);
-
-    if (erase_all || !ok) {
-        bmp388_storage_erase_all();
+    if (h->magic != LOG_MAGIC) {
+        log_header_t nh = { .magic = LOG_MAGIC, .count = 0 };
+        flash_erase_sectors(LOG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+        flash_program_block(LOG_FLASH_OFFSET, &nh, FLASH_PAGE_SIZE);
+        g.hdr = nh;
+        g.write_pos = 0;
+        g.page_fill = 0;
+        g.last_time_ms = 0;
+        memset(g.page_buf, 0xFF, sizeof g.page_buf);
         return;
     }
-
-    g_hdr       = *h;
-    g_write_pos = g_hdr.count * RECORD_SIZE;
-    g_page_fill = g_write_pos % FLASH_PAGE_SIZE;
-    memset(g_page_buf, 0xFF, sizeof g_page_buf);
-
-    g_have_anchor  = (g_hdr.count > 0) || (g_hdr.base_time_ms != 0);
-    g_last_time_ms = g_hdr.base_time_ms;
-
-    /* NOTE: We do NOT reconstruct RAM log from flash here (reader is bugged).
-       RAM log will accumulate from new appends after boot. */
+    g.hdr = *h;
+    g.write_pos = g.hdr.count * sizeof(log_rec4_t);
+    g.page_fill = 0;
+    g.last_time_ms = 0;
+    memset(g.page_buf, 0xFF, sizeof g.page_buf);
 }
 
-/* ===== Page flush ===== */
-static int flush_page_if_full(void) {
-    if (g_page_fill < FLASH_PAGE_SIZE) return 0;
-
-    uint32_t bytes_before_this_page = g_write_pos - FLASH_PAGE_SIZE;
-    uint32_t page_index = bytes_before_this_page / FLASH_PAGE_SIZE;
-    uint32_t flash_off = LOG_FLASH_OFFSET + FLASH_PAGE_SIZE + page_index * FLASH_PAGE_SIZE;
-
-    flash_program_block(flash_off, g_page_buf, FLASH_PAGE_SIZE);
-    memset(g_page_buf, 0xFF, sizeof g_page_buf);
-    g_page_fill = 0;
-
-    /* persist header (count) after each page flush */
-    write_header_to_flash_active(&g_hdr);
+int bmp388_storage_init(void) {
+    hdr_load_or_init();
     return 0;
 }
 
-/* ===== ACTIVE append (also mirrors to RAM log) ===== */
-int bmp388_storage_append(uint32_t time_ms, float temperature_c) {
-    if (!g_have_anchor) {
-        g_hdr.base_time_ms = time_ms;
-        g_last_time_ms     = time_ms;
-        g_have_anchor      = true;
-        write_header_to_flash_active(&g_hdr);
-    }
+uint32_t bmp388_storage_count(void) {
+    return g.hdr.count;
+}
 
-    /* If ACTIVE is full, just wrap by erasing (since BACKUP is removed). */
-    if (g_write_pos + RECORD_SIZE > g_hdr.capacity_bytes) {
-        bmp388_storage_erase_all();
-        // After erase, anchor will be set by next append
+/* Chronological RAM-log accessors */
+static inline void ramlog_add(uint32_t t_ms, float temp) {
+    uint32_t pos;
+    if (g_ram.count < RAMLOG_CAP) {
+        pos = (g_ram.head + g_ram.count) % RAMLOG_CAP;
+        g_ram.count++;
+    } else {
+        pos = g_ram.head;
+        g_ram.head = (g_ram.head + 1) % RAMLOG_CAP;
+    }
+    g_ram.t_ms[pos] = t_ms;
+    g_ram.temp[pos] = temp;
+}
+static inline uint32_t ramlog_count(void) { return g_ram.count; }
+static inline void ramlog_get(uint32_t i, uint32_t *t_ms, float *temp) {
+    uint32_t pos = (g_ram.head + i) % RAMLOG_CAP;
+    if (t_ms) *t_ms = g_ram.t_ms[pos];
+    if (temp) *temp = g_ram.temp[pos];
+}
+
+/* Flush buffered page to flash ACTIVE data area */
+static int flush_page_if_full(void) {
+    if (g.page_fill == 0) return 0;
+    uint32_t off = LOG_FLASH_OFFSET + FLASH_PAGE_SIZE + g.write_pos - g.page_fill;
+    flash_program_block(off, g.page_buf, FLASH_PAGE_SIZE);
+    g.page_fill = 0;
+    memset(g.page_buf, 0xFF, sizeof g.page_buf);
+    /* Update header count */
+    flash_program_block(LOG_FLASH_OFFSET, &g.hdr, FLASH_PAGE_SIZE);
+    return 0;
+}
+
+/* Append record to ACTIVE (and mirror to RAM) */
+int bmp388_storage_append(uint32_t time_ms, float temperature_c) {
+    /* Page-full handling */
+    if ((g.write_pos + sizeof(log_rec4_t)) > (LOG_REGION_SIZE - FLASH_PAGE_SIZE)) {
+        /* ACTIVE full: just stop appending (or rotate if you still use BACKUP) */
         return -1;
     }
 
-    uint32_t delta_ms = (time_ms >= g_last_time_ms) ? (time_ms - g_last_time_ms) : 0;
-    uint32_t delta_10 = delta_ms / 10u;  if (delta_10 > 0xFFFFu) delta_10 = 0xFFFFu;
+    uint32_t delta_ms = (g.last_time_ms <= time_ms) ? (time_ms - g.last_time_ms) : 0;
+    uint32_t delta_10 = delta_ms / 10u; if (delta_10 > 0xFFFFu) delta_10 = 0xFFFFu;
 
     int32_t t_centi = (int32_t)(temperature_c * 100.0f);
     if (t_centi >  32767) t_centi =  32767;
     if (t_centi < -32768) t_centi = -32768;
 
-    log_rec4_t rec;
-    rec.dtime_10ms   = (uint16_t)delta_10;
-    rec.temp_c_centi = (int16_t)t_centi;
+    log_rec4_t rec = { .dtime_10ms = (uint16_t)delta_10, .temp_c_centi = (int16_t)t_centi };
 
-    memcpy(&g_page_buf[g_page_fill], &rec, sizeof rec);
-    g_page_fill  += sizeof rec;
-    g_write_pos  += sizeof rec;
-    g_hdr.count  += 1;
-    g_last_time_ms = g_last_time_ms + (uint32_t)rec.dtime_10ms * 10u;
+    memcpy(&g.page_buf[g.page_fill], &rec, sizeof rec);
+    g.page_fill  += sizeof rec;
+    g.write_pos  += sizeof rec;
+    g.hdr.count  += 1;
+    g.last_time_ms = g.last_time_ms + (uint32_t)rec.dtime_10ms * 10u;
 
-    /* Mirror to RAM log for robust dumping */
+    /* Mirror to RAM for dumps */
     ramlog_add(time_ms, temperature_c);
 
-    return flush_page_if_full();
+    /* Flush when the buffer reaches a page boundary */
+    if (g.page_fill >= FLASH_PAGE_SIZE) return flush_page_if_full();
+    return 0;
 }
 
-/* ===== Corrected 0.5 °C bucket mapper =====
-   Centers buckets on 22.5 °C, 23.0 °C, 23.5 °C, 24.0 °C, 24.5 °C, etc.
-   Each bucket covers ±0.25 °C around its midpoint.
-   Below 22.25 °C → bucket 0, above 28.25 °C → bucket 12.
-*/
-static inline uint8_t bucket_0p5_22_28(float c) {
-    const float minC = 22.5f;   // midpoint of first bucket
-    const float step = 0.5f;    // step between buckets
-    int idx;
-
-    if (c < (minC - step)) {    // below 22.0 °C
-        idx = 0;
-    } else if (c >= (minC + 12 * step)) { // above 28.5 °C
-        idx = 12;
-    } else {
-        // round to nearest bucket center
-        idx = (int)((c - minC) / step + 0.5f) + 1;
-        if (idx < 0) idx = 0;
-        if (idx > 12) idx = 12;
+/* Optional: read from ACTIVE by replaying deltas (kept for compatibility) */
+int bmp388_storage_read(uint32_t index, uint32_t *out_ms, float *out_temp) {
+    if (index >= g.hdr.count) return -1;
+    /* Simple linear walk (compact driver prefers RAM mirror anyway) */
+    const uint8_t *p = xip_data_active();
+    uint32_t t_ms = 0;
+    for (uint32_t i = 0; i <= index; i++) {
+        const log_rec4_t *r = (const log_rec4_t *)&p[i * sizeof(log_rec4_t)];
+        t_ms += (uint32_t)r->dtime_10ms * 10u;
+        if (i == index) {
+            if (out_ms) *out_ms = t_ms;
+            if (out_temp) *out_temp = ((float)r->temp_c_centi) / 100.0f;
+        }
     }
-    return (uint8_t)idx;
+    return 0;
 }
 
+void bmp388_storage_erase_all(void) {
+    flash_erase_sectors(LOG_FLASH_OFFSET, LOG_REGION_SIZE);
+    hdr_load_or_init();
+}
 
-/* ===== NEW: Binary compact dump (from RAM log, not flash) =====
-   - Header: 0xC1, 0x01, count(LE), bucket_count=13
-   - FIRST timestamp only (OPC_TS + u32le) from RAM oldest
-   - OPC_E on excursion toggles (byte-aligned)
-   - Two 4-bit buckets per byte (high nibble then low)
-   - Ends with OPC_END
-*/
-void dump_active_compact_bit(void) {
-    uint32_t n = ramlog_count();
+/* ===== Shared compact-bit encoder (callback-based, single source of truth) ===== */
+typedef void (*cbit_emit_fn)(uint8_t byte, void *ctx);
+static inline void emit_byte(cbit_emit_fn f, void *ctx, uint8_t b, size_t *ctr) { f(b, ctx); (*ctr)++; }
 
-    /* header */
-    putchar_raw(0xC1);
-    putchar_raw(0x01);
-    putchar_raw((uint8_t)(n & 0xFF));
-    putchar_raw((uint8_t)(n >> 8));
-    putchar_raw(13);  /* 13 buckets: 0..12 (22..28 °C by 0.5) */
+static inline uint8_t bucket_0p5_22_28(float c);
 
-    if (n == 0) { putchar_raw(OPC_END); return; }
+size_t bmp388_compact_encode(cbit_emit_fn emit, void *ctx) {
+    size_t out = 0;
+    const uint32_t n = ramlog_count();
 
-    /* Emit ONLY the first timestamp from RAM oldest */
-    uint32_t t0_ms; float t0_temp;
-    ramlog_get(0, &t0_ms, &t0_temp);
-    putchar_raw(OPC_TS);
-    putchar_raw((uint8_t)(t0_ms));
-    putchar_raw((uint8_t)(t0_ms >> 8));
-    putchar_raw((uint8_t)(t0_ms >> 16));
-    putchar_raw((uint8_t)(t0_ms >> 24));
+    /* Header: 0xC1, 0x01, count(LE16), bucket_count=13 */
+    emit_byte(emit, ctx, 0xC1, &out);
+    emit_byte(emit, ctx, 0x01, &out);
+    emit_byte(emit, ctx, (uint8_t)(n & 0xFF), &out);
+    emit_byte(emit, ctx, (uint8_t)(n >> 8),   &out);
+    emit_byte(emit, ctx, 13,                  &out);
+
+    if (n == 0) { emit_byte(emit, ctx, OPC_END, &out); return out; }
+
+    /* First timestamp marker (oldest sample) */
+    uint32_t t0_ms; float t0c;
+    ramlog_get(0, &t0_ms, &t0c);
+    emit_byte(emit, ctx, OPC_TS, &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms),       &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms >> 8),  &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms >> 16), &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms >> 24), &out);
 
     bool have_prev = false, prev_exc = false;
-    uint8_t acc = 0;           /* accumulator for two 4-bit nibbles */
-    bool high_nibble = true;   /* true = write high nibble next */
+    uint8_t acc = 0;
+    bool high_nibble = true;
 
     for (uint32_t i = 0; i < n; i++) {
         uint32_t t_ms; float temp;
         ramlog_get(i, &t_ms, &temp);
 
-        /* excursion toggle handling (byte-align before opcode) */
         bool exc = is_excursion(temp);
-        if (!have_prev) {
-            have_prev = true;
-            prev_exc  = exc;
-        } else if (exc != prev_exc) {
-            if (!high_nibble) { putchar_raw(acc); acc = 0; high_nibble = true; }
-            putchar_raw(OPC_E);
+        if (!have_prev) { have_prev = true; prev_exc = exc; }
+        else if (exc != prev_exc) {
+            if (!high_nibble) { emit_byte(emit, ctx, acc, &out); acc=0; high_nibble=true; }
+            emit_byte(emit, ctx, OPC_E, &out);
             prev_exc = exc;
         }
 
-        /* map 22..28 in 0.5 °C steps (0..12) and pack two per byte */
-        uint8_t b = bucket_0p5_22_28(temp) & 0x0F;
-        if (high_nibble) {
-            acc = (uint8_t)(b << 4);
-            high_nibble = false;
-        } else {
-            acc |= b;
-            putchar_raw(acc);
-            acc = 0;
-            high_nibble = true;
-        }
+        uint8_t b = (uint8_t)(bucket_0p5_22_28(temp) & 0x0F);
+        if (high_nibble) { acc = (uint8_t)(b << 4); high_nibble=false; }
+        else { acc |= b; emit_byte(emit, ctx, acc, &out); acc=0; high_nibble=true; }
     }
 
-    /* flush trailing nibble if odd sample count */
-    if (!high_nibble) putchar_raw(acc);
+    if (!high_nibble) emit_byte(emit, ctx, acc, &out);
+    emit_byte(emit, ctx, OPC_END, &out);
+    return out;
+}
 
-    putchar_raw(OPC_END);
+/* UART dumper via the same encoder */
+static void uart_emit(uint8_t b, void *ctx) { (void)ctx; putchar_raw(b); }
+void dump_active_compact_bit(void) {
+    (void)bmp388_compact_encode(uart_emit, NULL);
+}
+
+/* ===== Save exact compact stream to flash and dump back raw ===== */
+void bmp388_backup_compact_save(void) {
+    static uint8_t staging[COMPACT_REGION_SIZE - FLASH_PAGE_SIZE];
+    struct { uint8_t *p; size_t cap; size_t w; } bc = { staging, sizeof(staging), 0 };
+    void buf_emit(uint8_t b, void *v) {
+        struct { uint8_t *p; size_t cap; size_t w; } *ctx = v;
+        if (ctx->w < ctx->cap) ctx->p[ctx->w++] = b;
+    }
+
+    (void)bmp388_compact_encode(buf_emit, &bc);
+
+    /* Erase region and write header + data */
+    flash_erase_sectors(COMPACT_FLASH_OFFSET, COMPACT_REGION_SIZE);
+
+    compact_hdr_t hdr;
+    memset(&hdr, 0xFF, sizeof hdr);
+    hdr.magic  = CB_MAGIC;
+    hdr.length = (uint32_t)bc.w;
+    flash_program_block(COMPACT_FLASH_OFFSET, &hdr, FLASH_PAGE_SIZE);
+
+    uint32_t written = 0;
+    while (written < hdr.length) {
+        uint8_t page[FLASH_PAGE_SIZE];
+        size_t chunk = (hdr.length - written > FLASH_PAGE_SIZE) ? FLASH_PAGE_SIZE : (hdr.length - written);
+        memset(page, 0xFF, sizeof page);
+        memcpy(page, &staging[written], chunk);
+        uint32_t dst = COMPACT_FLASH_OFFSET + FLASH_PAGE_SIZE + written;
+        flash_program_block(dst, page, FLASH_PAGE_SIZE);
+        written += (uint32_t)chunk;
+    }
+    printf("[COMPACT] Saved %u bytes to flash.\n", (unsigned)hdr.length);
+}
+
+void dump_backup_compact_raw(void) {
+    const compact_hdr_t *h = xip_hdr_compact();
+    if (h->magic != CB_MAGIC) { printf("[COMPACT] No blob found.\n"); return; }
+    const uint8_t *p = xip_data_compact();
+    for (uint32_t i=0;i<h->length;i++) putchar_raw(p[i]);
+    printf("\n[COMPACT] Dumped %u bytes.\n", (unsigned)h->length);
 }

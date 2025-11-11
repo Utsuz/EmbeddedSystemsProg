@@ -33,8 +33,8 @@ int main(void) {
     stdio_init_all();
     sleep_ms(1200);
     printf("\n=== BMP388 Logger (Dual-Region) ===\n");
-    bmp388_storage_init(LOG_ERASE_ON_BOOT);
-
+    bmp388_storage_init();
+    
     int rc = bmp388_init(EX_I2C_PORT, EX_SDA_PIN, EX_SCL_PIN, EX_ADDR);
     if (rc) { printf("Init failed: %d\n", rc); while (1) sleep_ms(1000); }
 
@@ -60,8 +60,8 @@ int main(void) {
         // if (c == 'B' || c == 'b') dump_backup();
         // if (c == 'R' || c == 'r') { bmp388_storage_rotate_to_backup(); printf("Rotated ACTIVE -> BACKUP.\n"); }
         // if (c == 'X' || c == 'x') { bmp388_backup_clear(); printf("BACKUP cleared.\n"); }
-        // if (c == 'S' || c == 's') bmp388_backup_compact_save();
-        // if (c == 'B' || c == 'b') dump_backup_compact_raw();
+        if (c == 'S' || c == 's') bmp388_backup_compact_save();
+        if (c == 'B' || c == 'b') dump_backup_compact_raw();
         if (c == 'A' || c == 'a') dump_active_compact_bit();
 
         /* --- periodic sample + append to ACTIVE --- */

@@ -53,7 +53,7 @@ int main(void) {
     activation_driver_init(UART_PORT_NUM, UART_TX_PIN, UART_RX_PIN, UART_BAUDRATE);
 
     /* --- Init BMP388 + storage --- */
-    bmp388_storage_init(LOG_ERASE_ON_BOOT);
+    bmp388_storage_init();    
     int rc = bmp388_init(EX_I2C_PORT, EX_SDA_PIN, EX_SCL_PIN, EX_ADDR);
     if (rc) {
         printf("BMP388 init failed: %d\n", rc);
