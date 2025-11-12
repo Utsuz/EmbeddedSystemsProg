@@ -67,7 +67,10 @@ int main(void) {
 
     bool prev_dump   = true;
     bool prev_toggle = true;
-    bool sensor_active = true;           // start sampling by default
+
+    bool sensor_active = false;           // Only start sensing when activated
+    bmp388_sensorStop();
+
     absolute_time_t next_sample = make_timeout_time_ms(SAMPLE_PERIOD_MS);
 
     /* --- State machine for handshake/time --- */
@@ -84,7 +87,7 @@ int main(void) {
             if (bmp388_read(&s) == 0) {
                 uint32_t now_ms = to_ms_since_boot(get_absolute_time());
                 bmp388_storage_append(now_ms, s.temperature_c);
-                printf("T=%.2f C (t=%u)\n", s.temperature_c, (unsigned)now_ms);
+                printf("[LOG] T=%.2f C (t=%u)\n", s.temperature_c, (unsigned)now_ms);
             }
             next_sample = delayed_by_ms(next_sample, SAMPLE_PERIOD_MS);
         }
@@ -165,9 +168,13 @@ int main(void) {
                             printf("[Slave] Human time: %s", ctime(&t));
 
                             // Start/continue sampling; logger uses ms_since_boot internally.
+                            bmp388_sensorStart();
                             sensor_active = true;
+                            printf("[Slave]  BMP388 Logging started, syncronized to Master's time. \n");
+
                             got_time = true;
                             state = STATE_IDLE;
+                            break;
                         } else {
                             printf("[Slave] Failed to parse TIME: %s\n", recv_buf);
                         }
