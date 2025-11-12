@@ -28,12 +28,13 @@ endif()
 pico_sdk_init()
 
 # Wifi (2.4 GHz only)
-if (NOT DEFINED WIFI_SSID)
-    set(WIFI_SSID "Twa...") # Set your own SSID
-endif()
-
-if (NOT DEFINED WIFI_PASSWORD)
-    set(WIFI_PASSWORD "T0waMajiTenshi!") # Set your own Password
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/secrets.cmake")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/secrets.cmake")
+    message(STATUS "Loaded Wi-Fi credentials from secrets.cmake")
+else()
+    message(WARNING "secrets.cmake not found. Using placeholder Wi-Fi credentials.")
+    set(WIFI_SSID "placeholder_ssid")
+    set(WIFI_PASSWORD "placeholder_password")
 endif()
 
 add_compile_options(-Wall
@@ -45,7 +46,6 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 
 # Hardware-specific examples in subdirectories:
-add_subdirectory(main)
 add_subdirectory(bmp388)
 add_subdirectory(ntp_driver)
 add_subdirectory(activation_driver)
