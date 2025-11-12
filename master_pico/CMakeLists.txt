@@ -10,6 +10,7 @@ target_link_libraries(master_pico
     activation_driver
     pico_cyw43_arch_lwip_sys_freertos
     FreeRTOS-Kernel-Heap4
+    bmp388_core
 )
 
 # Wifi credentials

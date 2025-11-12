@@ -2,6 +2,7 @@
 
 #include "bmp388_driver.h"
 #include "pico/stdlib.h"
+#include "flash_helpers.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include <string.h>
@@ -49,35 +50,21 @@ static inline const uint8_t      *xip_data_active(void)  { return (const uint8_t
 #endif
 #define COMPACT_FLASH_OFFSET  (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE - COMPACT_REGION_SIZE)
 #define COMPACT_XIP_BASE      (XIP_BASE + COMPACT_FLASH_OFFSET)
-#define CB_MAGIC  0x43424954u /* 'CBIT' */
-typedef struct __attribute__((packed)) {
-    uint32_t magic;   /* CB_MAGIC */
-    uint32_t length;  /* number of valid bytes in 'data' */
-    uint8_t  reserved[FLASH_PAGE_SIZE - 8]; /* pad to 1 page */
-} compact_hdr_t;
-static inline const compact_hdr_t *xip_hdr_compact(void) {
+
+const uint32_t CB_MAGIC = 0x43424954u; /* 'CBIT' */
+
+const compact_hdr_t *xip_hdr_compact(void) {
     return (const compact_hdr_t *)(COMPACT_XIP_BASE);
 }
-static inline const uint8_t *xip_data_compact(void) {
+const uint8_t *xip_data_compact(void) {
     return (const uint8_t *)(COMPACT_XIP_BASE + FLASH_PAGE_SIZE);
-}
-
-/* ===== Flash helpers ===== */
-static void flash_program_block(uint32_t flash_off, const void *data, size_t len) {
-    uint32_t irq = save_and_disable_interrupts();
-    flash_range_program(flash_off, (const uint8_t*)data, len);
-    restore_interrupts(irq);
-}
-static void flash_erase_sectors(uint32_t flash_off, size_t len) {
-    uint32_t irq = save_and_disable_interrupts();
-    flash_range_erase(flash_off, len);
-    restore_interrupts(irq);
 }
 
 /* ===== ACTIVE in-RAM mirror for robust dumping ===== */
 typedef struct {
     uint32_t t_ms[RAMLOG_CAP];
     float    temp[RAMLOG_CAP];
+    bool     exc[RAMLOG_CAP]; 
     uint32_t head;    /* oldest index */
     uint32_t count;   /* number of valid items (<= RAMLOG_CAP) */
 } ramlog_t;
@@ -108,8 +95,27 @@ static inline uint8_t bucket_0p5_22_28(float t) {
     return (uint8_t)b;
 }
 
-/* Simple excursion detector; adjust to your policy */
-static inline bool is_excursion(float t) { return (t < 23.0f || t > 24.5f); }
+static inline void ramlog_add(uint32_t t_ms, float temp, bool exc_now) {
+    uint32_t pos;
+    if (g_ram.count < RAMLOG_CAP) {
+        pos = (g_ram.head + g_ram.count) % RAMLOG_CAP;
+        g_ram.count++;
+    } else {
+        pos = g_ram.head;
+        g_ram.head = (g_ram.head + 1) % RAMLOG_CAP;
+    }
+    g_ram.t_ms[pos] = t_ms;
+    g_ram.temp[pos] = temp;
+    g_ram.exc[pos]  = exc_now;   // <-- NEW
+}
+
+static inline uint32_t ramlog_count(void) { return g_ram.count; }
+static inline void ramlog_get(uint32_t i, uint32_t *t_ms, float *temp, bool *exc) {
+    uint32_t pos = (g_ram.head + i) % RAMLOG_CAP;
+    if (t_ms) *t_ms = g_ram.t_ms[pos];
+    if (temp) *temp = g_ram.temp[pos];
+    if (exc)  *exc  = g_ram.exc[pos];   // <-- NEW
+}
 
 /* ===== ACTIVE header/cache ===== */
 static void hdr_load_or_init(void) {
@@ -139,26 +145,6 @@ int bmp388_storage_init(void) {
 
 uint32_t bmp388_storage_count(void) {
     return g.hdr.count;
-}
-
-/* Chronological RAM-log accessors */
-static inline void ramlog_add(uint32_t t_ms, float temp) {
-    uint32_t pos;
-    if (g_ram.count < RAMLOG_CAP) {
-        pos = (g_ram.head + g_ram.count) % RAMLOG_CAP;
-        g_ram.count++;
-    } else {
-        pos = g_ram.head;
-        g_ram.head = (g_ram.head + 1) % RAMLOG_CAP;
-    }
-    g_ram.t_ms[pos] = t_ms;
-    g_ram.temp[pos] = temp;
-}
-static inline uint32_t ramlog_count(void) { return g_ram.count; }
-static inline void ramlog_get(uint32_t i, uint32_t *t_ms, float *temp) {
-    uint32_t pos = (g_ram.head + i) % RAMLOG_CAP;
-    if (t_ms) *t_ms = g_ram.t_ms[pos];
-    if (temp) *temp = g_ram.temp[pos];
 }
 
 /* Flush buffered page to flash ACTIVE data area */
@@ -196,8 +182,8 @@ int bmp388_storage_append(uint32_t time_ms, float temperature_c) {
     g.hdr.count  += 1;
     g.last_time_ms = g.last_time_ms + (uint32_t)rec.dtime_10ms * 10u;
 
-    /* Mirror to RAM for dumps */
-    ramlog_add(time_ms, temperature_c);
+    bool exc_now = bmp388_excursion_state();     // <-- NEW (from sensor driver)
+    ramlog_add(time_ms, temperature_c, exc_now); // <-- pass it into RAM mirror
 
     /* Flush when the buffer reaches a page boundary */
     if (g.page_fill >= FLASH_PAGE_SIZE) return flush_page_if_full();
@@ -236,47 +222,47 @@ size_t bmp388_compact_encode(cbit_emit_fn emit, void *ctx) {
     size_t out = 0;
     const uint32_t n = ramlog_count();
 
-    /* Header: 0xC1, 0x01, count(LE16), bucket_count=13 */
+    // Header (unchanged)
     emit_byte(emit, ctx, 0xC1, &out);
     emit_byte(emit, ctx, 0x01, &out);
     emit_byte(emit, ctx, (uint8_t)(n & 0xFF), &out);
     emit_byte(emit, ctx, (uint8_t)(n >> 8),   &out);
     emit_byte(emit, ctx, 13,                  &out);
 
-    if (n == 0) { emit_byte(emit, ctx, OPC_END, &out); return out; }
+    if (n == 0) { emit_byte(emit, ctx, 0xEE, &out); return out; }
 
-    /* First timestamp marker (oldest sample) */
-    uint32_t t0_ms; float t0c;
-    ramlog_get(0, &t0_ms, &t0c);
-    emit_byte(emit, ctx, OPC_TS, &out);
+    // First TS marker
+    uint32_t t0_ms; float t0c; bool e0;
+    ramlog_get(0, &t0_ms, &t0c, &e0);
+    emit_byte(emit, ctx, 0xF0, &out);
     emit_byte(emit, ctx, (uint8_t)(t0_ms),       &out);
     emit_byte(emit, ctx, (uint8_t)(t0_ms >> 8),  &out);
     emit_byte(emit, ctx, (uint8_t)(t0_ms >> 16), &out);
     emit_byte(emit, ctx, (uint8_t)(t0_ms >> 24), &out);
 
-    bool have_prev = false, prev_exc = false;
-    uint8_t acc = 0;
+    bool prev_exc = e0;             // <-- use recorded driver state
     bool high_nibble = true;
+    uint8_t acc = 0;
 
     for (uint32_t i = 0; i < n; i++) {
-        uint32_t t_ms; float temp;
-        ramlog_get(i, &t_ms, &temp);
+        uint32_t t_ms; float temp; bool exc;
+        ramlog_get(i, &t_ms, &temp, &exc);  // <-- read recorded flag
 
-        bool exc = is_excursion(temp);
-        if (!have_prev) { have_prev = true; prev_exc = exc; }
-        else if (exc != prev_exc) {
-            if (!high_nibble) { emit_byte(emit, ctx, acc, &out); acc=0; high_nibble=true; }
-            emit_byte(emit, ctx, OPC_E, &out);
+        // If excursion flag toggled since last sample, emit E (flush any half-byte first)
+        if (exc != prev_exc) {
+            if (!high_nibble) { emit_byte(emit, ctx, acc, &out); acc = 0; high_nibble = true; }
+            emit_byte(emit, ctx, 0xE5, &out);   // OPC_E
             prev_exc = exc;
         }
 
-        uint8_t b = (uint8_t)(bucket_0p5_22_28(temp) & 0x0F);
-        if (high_nibble) { acc = (uint8_t)(b << 4); high_nibble=false; }
-        else { acc |= b; emit_byte(emit, ctx, acc, &out); acc=0; high_nibble=true; }
+        // Bucket encode (unchanged; map to 0..12 then pack 2 samples per byte)
+        uint8_t b = bucket_0p5_22_28(temp) & 0x0F;
+        if (high_nibble) { acc = (uint8_t)(b << 4); high_nibble = false; }
+        else { acc |= b; emit_byte(emit, ctx, acc, &out); acc = 0; high_nibble = true; }
     }
 
     if (!high_nibble) emit_byte(emit, ctx, acc, &out);
-    emit_byte(emit, ctx, OPC_END, &out);
+    emit_byte(emit, ctx, 0xEE, &out);   // OPC_END
     return out;
 }
 

@@ -1,7 +1,9 @@
 add_library(bmp388_core STATIC
     sensor_driver.c
     storage_driver.c
+    flash_helpers.c
     bmp388_driver.h
+    flash_helpers.h
 )
 
 target_include_directories(bmp388_core PUBLIC ${CMAKE_CURRENT_LIST_DIR})

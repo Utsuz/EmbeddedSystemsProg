@@ -33,15 +33,57 @@
 #ifndef SAMPLE_PERIOD_MS
 #define SAMPLE_PERIOD_MS 5000
 #endif
+#ifndef EXCURSION_PERIOD_MS
+#define EXCURSION_PERIOD_MS 200   /* fast sampling while in excursion */
+#endif
 #ifndef LOG_ERASE_ON_BOOT
 #define LOG_ERASE_ON_BOOT 0
 #endif
+
+static inline uint32_t current_period_ms(void) {
+    return bmp388_excursion_state() ? EXCURSION_PERIOD_MS : SAMPLE_PERIOD_MS;
+}
 
 typedef enum {
     STATE_HANDSHAKE,
     STATE_IDLE,
     STATE_WAIT_TIME
 } comm_state_t;
+
+// --- Helper Function to Dump Compact Data to Master UART (UART1) ---
+static uint32_t dump_compact_to_uart(void) {
+    const compact_hdr_t *h = xip_hdr_compact();
+    
+    // Check for valid blob (CB_MAGIC check and non-zero length)
+    if (h->magic != CB_MAGIC || h->length == 0) { 
+        printf("[COMPACT] No valid blob found (len: %u).\n", (unsigned)h->length);
+        activation_send("ACK_EMPTY\n"); // Signal to Master that log is empty
+        return 0;
+    }
+
+    uint32_t length = h->length;
+    
+    // 1. Tell the Master the length first (Text-based signal)
+    char msg[64];
+    snprintf(msg, sizeof(msg), "LENGTH %u\n", (unsigned)length);
+    activation_send(msg);
+
+    sleep_ms(100);  
+
+    printf("[Slave] Sending %u bytes of compact data...\n", (unsigned)length);
+
+    // 2. Send the raw binary data
+    const uint8_t *p = xip_data_compact();
+    // Use the raw UART put function for binary transfer
+    for (uint32_t i = 0; i < length; i++) {
+        uart_putc_raw(uart_get_instance(UART_PORT_NUM), p[i]);
+    }
+    
+    // 3. Send the DONE signal (Text-based footer)
+    activation_send("DONE\n");
+    
+    return length;
+}
 
 int main(void) {
     stdio_init_all();
@@ -67,11 +109,9 @@ int main(void) {
 
     bool prev_dump   = true;
     bool prev_toggle = true;
+    bool sensor_active = false;          
 
-    bool sensor_active = false;           // Only start sensing when activated
-    bmp388_sensorStop();
-
-    absolute_time_t next_sample = make_timeout_time_ms(SAMPLE_PERIOD_MS);
+    absolute_time_t next = make_timeout_time_ms(SAMPLE_PERIOD_MS);
 
     /* --- State machine for handshake/time --- */
     char recv_buf[128];
@@ -82,14 +122,20 @@ int main(void) {
 
     while (true) {
         /* ========== background: periodic sampling ========== */
-        if (sensor_active && absolute_time_diff_us(get_absolute_time(), next_sample) <= 0) {
+        if (sensor_active && absolute_time_diff_us(get_absolute_time(), next) <= 0) {
             bmp388_sample_t s;
             if (bmp388_read(&s) == 0) {
                 uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-                bmp388_storage_append(now_ms, s.temperature_c);
-                printf("[LOG] T=%.2f C (t=%u)\n", s.temperature_c, (unsigned)now_ms);
+                int lr = bmp388_storage_append(now_ms, s.temperature_c);
+                printf("T=%.2f C (t=%u)%s\n",
+                       s.temperature_c, (unsigned)now_ms,
+                       bmp388_excursion_state() ? " [FAST]" : "");
+                if (lr) {
+                    printf("Note: ACTIVE region is full; sample not saved.\n");
+                }
             }
-            next_sample = delayed_by_ms(next_sample, SAMPLE_PERIOD_MS);
+            /* Re-schedule from NOW so an excursion flip changes cadence immediately */
+            next = delayed_by_ms(get_absolute_time(), current_period_ms());
         }
 
         /* ========== background: quick USB command for dump ========== */
@@ -138,18 +184,35 @@ int main(void) {
                 break;
 
             case STATE_IDLE:
-                // GP20: ask master for time (unchanged)
+                // GP20: ask master for time 
                 if (!gpio_get(BTN_TIME)) {
                     printf("[Slave] Button pressed → Requesting time\n");
                     activation_send("GET_TIME\n");
                     state = STATE_WAIT_TIME;
                 }
-                // Optional: respond to simple text GET_DATA with a friendly ack
+                // Handle GET_DATA command from Master 
                 if (activation_receive_line(recv_buf, sizeof(recv_buf))) {
                     if (strncmp(recv_buf, "GET_DATA", 8) == 0) {
-                        // NOTE: binary dump currently goes to USB stdio.
-                        // If you want the binary over UART1 to master, we’ll add a UART dumper.
-                        activation_send("ACK_LOGGING\n");
+                        printf("[Slave] Received GET_DATA. Stopping sensor, creating backup, and transferring...\n");
+                        
+                        // 1. Stop Logging/Sampling (per requirement)
+                        bmp388_sensorStop();
+                        sensor_active = false;
+                        printf("[Slave] Sensor stopped.\n");
+
+                        // 2. Create Compact Backup on Flash (per requirement)
+                        bmp388_backup_compact_save();
+                        printf("[Slave] Compact backup created on flash.\n");
+                        
+                        // 3. Dump Raw Compact Data over UART to Master
+                        uint32_t len = dump_compact_to_uart();
+                        
+                        if (len > 0) {
+                            printf("[Slave] Sent %u bytes of compact data over UART1.\n", (unsigned)len);
+                        } else {
+                            printf("[Slave] Log empty, sent ACK_EMPTY.\n");
+                        }
+                        
                     } else if (strncmp(recv_buf, "HELLO", 5) == 0) {
                         activation_send("HI\n");
                     }
@@ -167,14 +230,13 @@ int main(void) {
                             time_t t = (time_t)base_time;
                             printf("[Slave] Human time: %s", ctime(&t));
 
-                            // Start/continue sampling; logger uses ms_since_boot internally.
+                            // Start/continue sampling; logger uses ms_since_boot internally
                             bmp388_sensorStart();
                             sensor_active = true;
-                            printf("[Slave]  BMP388 Logging started, syncronized to Master's time. \n");
-
+                            printf("[Slave] Sensor started (time synchronized).\n");
+                            next = delayed_by_ms(get_absolute_time(), current_period_ms());
                             got_time = true;
                             state = STATE_IDLE;
-                            break;
                         } else {
                             printf("[Slave] Failed to parse TIME: %s\n", recv_buf);
                         }

@@ -2,6 +2,7 @@
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "bmp388_driver.h"
+#include "flash_helpers.h"
 
 #define EX_I2C_PORT   0
 #define EX_SDA_PIN    4

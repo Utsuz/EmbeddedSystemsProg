@@ -26,17 +26,6 @@ int      bmp388_storage_append(uint32_t time_ms, float temperature_c); /* Append
 int      bmp388_storage_read(uint32_t index, uint32_t *out_ms, float *out_temp);
 void     bmp388_storage_erase_all(void);
 
-/* ===== Backup (dual-region rotation) =====
- * BACKUP stores the most recent full ACTIVE log.
- * (Keep these if you still use the old rotation; safe to ignore otherwise.)
- */
-void     bmp388_storage_rotate_to_backup(void);
-uint32_t bmp388_backup_count(void);
-int      bmp388_backup_read(uint32_t index, uint32_t *out_ms, float *out_temp);
-void     bmp388_backup_clear(void);
-
-void dump_active(void); /* legacy text dump, safe to ignore */
-
 /* ==== NEW: Shared compact-bit encoder & helpers ==== */
 typedef void (*cbit_emit_fn)(uint8_t byte, void *ctx);
 
@@ -49,5 +38,20 @@ void     dump_active_compact_bit(void);
 /* Flash save / load of the exact compact-bit stream */
 void     bmp388_backup_compact_save(void);
 void     dump_backup_compact_raw(void);
+
+/* Excursion helpers */
+void bmp388_excursion_config(float t_low_c, float t_high_c, uint32_t stable_samples);
+bool bmp388_excursion_state(void);
+void bmp388_excursion_reset(void);
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t length;
+    uint8_t  reserved[256 - 8]; // Use macro for size if possible
+} compact_hdr_t;
+const compact_hdr_t *xip_hdr_compact(void);
+const uint8_t *xip_data_compact(void);
+// Add the constant itself
+extern const uint32_t CB_MAGIC;
 
 #endif
