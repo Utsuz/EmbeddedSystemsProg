@@ -4,15 +4,20 @@
 #include "FreeRTOS.h" 
 #include "task.h"
 #include "semphr.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include "hardware/uart.h"
 
 #include "usb/usb.h"
 #include "ntp_driver.h"
 #include "activation_driver.h"
 #include "uart_driver.h"
+#include "flash_helpers.h"
 
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 
 #define UART_PORT_NUM   1
 #define UART_TX_PIN     8
@@ -24,6 +29,23 @@
 #define NTP_REFRESH_INTERVAL_MS   (10 * 60 * 1000)  // 10 minutes
 #define NTP_FORCE_RESYNC_AGE_US   (15 * 60 * 1000000) // 15 minutes
 
+// --- Master Dump Flash Region Definitions ---
+#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+
+#define MASTER_DUMP_REGION_SIZE (32 * 1024)      // 32 KB for the received blob
+#define MASTER_DUMP_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - MASTER_DUMP_REGION_SIZE)
+#define MASTER_DUMP_XIP_BASE (XIP_BASE + MASTER_DUMP_FLASH_OFFSET)
+
+#define MASTER_DUMP_MAGIC 0x4D534452u
+#define MAX_COMPACT_DUMP_SIZE MASTER_DUMP_REGION_SIZE
+
+// Header structure for the saved data (consistent with slave compact_hdr_t pattern)
+typedef struct __attribute__((packed)) {
+    uint32_t magic;      /* 'MSDR' for Master Dump Received */
+    uint32_t length;     /* number of valid bytes in the dump */
+    uint8_t  reserved[FLASH_PAGE_SIZE - 8];
+} master_dump_hdr_t;
+
 typedef enum {
     STATE_HANDSHAKE,
     STATE_IDLE,
@@ -33,6 +55,41 @@ typedef enum {
 static SemaphoreHandle_t ntp_mutex;
 static time_t last_ntp_time = 0;
 static absolute_time_t last_sync_time;
+static uint8_t received_data_buffer[MAX_COMPACT_DUMP_SIZE];
+static uint32_t received_data_length = 0;
+
+// Master Save Function
+void master_save_compact_dump(const uint8_t *data, uint32_t length) {
+    if (length == 0 || length > MASTER_DUMP_REGION_SIZE - FLASH_PAGE_SIZE) {
+        printf("[Master Flash] ERROR: Data length (%u) invalid or too large.\n", (unsigned)length);
+        return;
+    }
+
+    // Erase the entire region
+    flash_erase_sectors(MASTER_DUMP_FLASH_OFFSET, MASTER_DUMP_REGION_SIZE);
+
+    // Create and Write Header
+    master_dump_hdr_t hdr;
+    memset(&hdr, 0xFF, sizeof(hdr));
+    hdr.magic = MASTER_DUMP_MAGIC;
+    hdr.length = length;
+    flash_program_block(MASTER_DUMP_FLASH_OFFSET, &hdr, FLASH_PAGE_SIZE);
+
+    // Write Data (starting right after the header page)
+    uint32_t written = 0;
+    while (written < length) {
+        uint8_t page[FLASH_PAGE_SIZE];
+        size_t chunk = (length - written > FLASH_PAGE_SIZE) ? FLASH_PAGE_SIZE : (length - written);
+        memset(page, 0xFF, sizeof page);
+        memcpy(page, &data[written], chunk);
+
+        uint32_t dst = MASTER_DUMP_FLASH_OFFSET + FLASH_PAGE_SIZE + written;
+        flash_program_block(dst, page, FLASH_PAGE_SIZE);
+        written += (uint32_t)chunk;
+    }
+
+    printf("[Master Flash] SUCCESS: Saved %u bytes to flash offset 0x%X.\n", (unsigned)length, (unsigned)MASTER_DUMP_FLASH_OFFSET);
+}
 
 // FreeRTOS Wi-Fi + NTP
 static void wifi_ntp_task(void *pvParameters) {
@@ -102,6 +159,7 @@ static void uart_activation_task(void *pvParameters) {
                 if (!gpio_get(BTN_PIN)) {
                     printf("[Master] Button pressed → Requesting data\n");
                     activation_send("GET_DATA\n");
+                    received_data_length = 0; // Reset bufffer tracking
                     vTaskDelay(pdMS_TO_TICKS(300));
                     state = STATE_RECEIVING;
                 }
@@ -167,56 +225,102 @@ static void uart_activation_task(void *pvParameters) {
 
             // --- RECEIVING PHASE ---
             case STATE_RECEIVING: {
+                char initial_response[64];
                 absolute_time_t start_time = get_absolute_time();
-                bool got_response = false;
+                
+                // 1. Wait for the Slave's initial text response (LENGTH, ACK_EMPTY, or GET_TIME)
+                if (activation_receive_line(initial_response, sizeof(initial_response))) {
+                    uint32_t expected_length = 0;
 
-                while (absolute_time_diff_us(get_absolute_time(), start_time) > -(TIMEOUT_MS * 1000)) {
-                    if (activation_receive_line(recv_buf, sizeof(recv_buf))) {
-                        got_response = true;
+                    if (sscanf(initial_response, "LENGTH %" PRIu32, &expected_length) == 1) {
+                        printf("[Master] Slave preparing to send %u bytes of compact data.\n", (unsigned)expected_length);
+                        received_data_length = 0; // Reset buffer counter
 
-                        if (strncmp(recv_buf, "DATA", 4) == 0) {
-                            printf("[Master] %s", recv_buf);
-                        } else if (strncmp(recv_buf, "DONE", 4) == 0) {
-                            printf("[Master] Data transfer complete.\n");
+                        if (expected_length > MAX_COMPACT_DUMP_SIZE) {
+                            printf("[Master] ERROR: Expected length %u exceeds MAX_DUMP_SIZE. Aborting.\n", (unsigned)expected_length);
                             state = STATE_IDLE;
                             break;
-                        } else if (strncmp(recv_buf, "ACK_EMPTY", 9) == 0) {
-                            printf("[Master] Slave not ready yet. Returning to idle.\n");
-                            state = STATE_IDLE;
-                            break;
-                        } else if (strncmp(recv_buf, "GET_TIME", 8) == 0) {
-                            // Handle GET_TIME here again if needed
-                            time_t current_time = 0;
-                            xSemaphoreTake(ntp_mutex, portMAX_DELAY);
-                            if (last_ntp_time > 0) {
-                                uint64_t delta_ms = to_ms_since_boot(get_absolute_time()) -
-                                                    to_ms_since_boot(last_sync_time);
-                                current_time = last_ntp_time + (delta_ms / 1000);
-                            }
-                            xSemaphoreGive(ntp_mutex);
+                        }
 
-                            if (current_time > 0) {
-                                char msg[64];
-                                snprintf(msg, sizeof(msg), "TIME %ld\n", current_time);
-                                activation_send(msg);
-                                printf("[Master] Sent current NTP time: %s", ctime(&current_time));
+                        // 2. Start Binary Data Reception
+                        uint32_t received_count = 0;
+                        start_time = get_absolute_time(); // Reset timeout for binary read
+
+                        // Read raw bytes until expected_length is met or timeout
+                        while (received_count < expected_length &&
+                                absolute_time_diff_us(get_absolute_time(), start_time) > -(TIMEOUT_MS * 1000)) {
+
+                            // Use non-blocking read to allow FreeRTOS context switching
+                            if (uart_driver_available()) {
+                                received_data_buffer[received_count++] = uart_driver_read_byte();
+                                start_time = get_absolute_time(); // Reset timeout on activity
+                            } else {
+                                // Wait briefly to avoid busy-waiting, allowing other tasks to run
+                                vTaskDelay(pdMS_TO_TICKS(1)); 
                             }
                         }
-                        start_time = get_absolute_time();
-                    }
+                        received_data_length = received_count;
+                        // End Binary Data Reception
 
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    if (state == STATE_IDLE) break;
+                        if (received_data_length == expected_length) {
+                            printf("[Master] SUCCESS: Received %u / %u bytes. Waiting for DONE message.\n",
+                                   (unsigned)received_data_length, (unsigned)expected_length);
+
+                            // Wait for the Slave's final "DONE" text message
+                            if (activation_receive_line(initial_response, sizeof(initial_response)) &&
+                                strncmp(initial_response, "DONE", 4) == 0) {
+                                printf("[Master] Data transfer complete and acknowledged by Slave.\n");
+                            } else {
+                                printf("[Master] WARNING: Received data but no proper DONE signal. Response: %s\n", initial_response);
+                            }
+
+                            // Save the received data to internal flash
+                            master_save_compact_dump(received_data_buffer, received_data_length);
+
+                            state = STATE_IDLE;
+                            break;
+
+                        } else {
+                            printf("[Master] ERROR: Binary transfer failed. Expected %u, got %u. Returning to idle.\n",
+                                   (unsigned)expected_length, (unsigned)received_data_length);
+                            state = STATE_IDLE;
+                            break;
+                        }
+
+                    } else if (strncmp(initial_response, "ACK_EMPTY", 9) == 0) {
+                        printf("[Master] Slave log is empty. Returning to idle.\n");
+                        state = STATE_IDLE;
+                        break;
+                    } else if (strncmp(initial_response, "GET_TIME", 8) == 0) {
+                        // Handle GET_TIME if the Slave asks for time during the transfer phase
+                        time_t current_time = 0;
+                        xSemaphoreTake(ntp_mutex, portMAX_DELAY);
+                        if (last_ntp_time > 0) {
+                            uint64_t delta_ms = to_ms_since_boot(get_absolute_time()) -
+                                                to_ms_since_boot(last_sync_time);
+                            current_time = last_ntp_time + (delta_ms / 1000);
+                        }
+                        xSemaphoreGive(ntp_mutex);
+
+                        if (current_time > 0) {
+                            char msg[64];
+                            snprintf(msg, sizeof(msg), "TIME %" PRIu64 "\n", (uint64_t)current_time);
+                            activation_send(msg);
+                            printf("[Master] Sent current NTP time: %s", ctime(&current_time));
+                        }
+                    } else {
+                        printf("[Master] Unexpected response in RECEIVING state: %s. Returning to idle.\n", initial_response);
+                        state = STATE_IDLE;
+                        break;
+                    }
                 }
 
-                if (state != STATE_IDLE) {
-                    if (!got_response) {
-                        printf("[Master] No response from slave (timeout after %d ms). Returning to idle.\n", TIMEOUT_MS);
-                    } else {
-                        printf("[Master] Incomplete exchange timed out, returning to idle.\n");
-                    }
+                // If no response at all (initial text timeout)
+                if (absolute_time_diff_us(get_absolute_time(), start_time) <= -(TIMEOUT_MS * 1000)) {
+                    printf("[Master] No initial response from slave (timeout after %d ms). Returning to idle.\n", TIMEOUT_MS);
                     state = STATE_IDLE;
                 }
+                vTaskDelay(pdMS_TO_TICKS(50));
                 break;
             }
         }

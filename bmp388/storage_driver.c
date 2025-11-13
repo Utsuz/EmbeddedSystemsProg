@@ -1,6 +1,8 @@
-// bmp388_storage.c
+// storage_driver.c — ACTIVE logging + shared compact-bit stream (UART/Flash)
+
 #include "bmp388_driver.h"
 #include "pico/stdlib.h"
+#include "flash_helpers.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include <string.h>
@@ -8,494 +10,305 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-/* ====== Logging layout/config ====== */
+/* ===== Tunables ===== */
 #ifndef LOG_REGION_SIZE
-#define LOG_REGION_SIZE   (128 * 1024)    /* ACTIVE region size */
+#define LOG_REGION_SIZE      (256 * 1024)  /* ACTIVE region size (end of flash) */
 #endif
 
-#define LOG_MAGIC         0x424D5039u     /* 'BMP9' - compact v2 */
-#define LOG_VERSION       2u
-
-#ifndef PICO_FLASH_SIZE_BYTES
-#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#ifndef RAMLOG_CAP
+#define RAMLOG_CAP           2048          /* mirror buffer for robust dumps */
 #endif
 
-/* Layout:
- * [ ... firmware ... ][ BACKUP LOG_REGION_SIZE ][ ACTIVE LOG_REGION_SIZE ]
+/* ===== Record format (on flash) =====
+ * Fixed 4-byte records: [dtime_10ms:u16][temp_c_centi:i16]
  */
-#define LOG_FLASH_OFFSET     (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE)          /* ACTIVE base */
-#define BACKUP_FLASH_OFFSET  (LOG_FLASH_OFFSET - LOG_REGION_SIZE)               /* BACKUP base */
-
-#define LOG_XIP_BASE         (XIP_BASE + LOG_FLASH_OFFSET)
-#define BACKUP_XIP_BASE      (XIP_BASE + BACKUP_FLASH_OFFSET)
-
-/* ==== Excursion detection (no on-flash format change) ==== */
-#ifndef EXCUR_T_LOW_C
-#define EXCUR_T_LOW_C   22.0f
-#endif
-#ifndef EXCUR_T_HIGH_C
-#define EXCUR_T_HIGH_C  23.5f
-#endif
-
-static inline bool is_excursion(float c) {
-    return (c < EXCUR_T_LOW_C) || (c > EXCUR_T_HIGH_C);
-}
-
-/* Put near top with the others */
-#define OPC_TS   0xF0  /* timestamp marker (existing) */
-#define OPC_E    0xE5  /* NEW: inline 'e' marker on excursion state flip */
-#define OPC_END  0xEE  /* end marker (existing) */
-
-/* 4-byte compact record: dtime(10ms) + temp(centi-degC) */
 typedef struct __attribute__((packed)) {
     uint16_t dtime_10ms;
     int16_t  temp_c_centi;
 } log_rec4_t;
-#define RECORD_SIZE       ((uint32_t)sizeof(log_rec4_t))
-#define RECORDS_PER_PAGE  (FLASH_PAGE_SIZE / RECORD_SIZE)
 
+/* ===== ACTIVE region header ===== */
 typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t capacity_bytes;   /* bytes available for data (excl. header page) */
-    uint32_t count;            /* #records (not necessarily page-flushed) */
-    uint32_t base_time_ms;     /* absolute ms for record #0 */
-    uint32_t reserved32[7];    /* pad to 64B; remainder of 256B page is 0xFF */
+    uint32_t magic;      /* 'LOG1' */
+    uint32_t count;      /* number of valid records */
 } log_header_t;
 
-/* ===== Runtime state (ACTIVE) ===== */
-static log_header_t g_hdr;
-static uint8_t  g_page_buf[FLASH_PAGE_SIZE];
-static uint32_t g_page_fill = 0;     /* bytes in RAM page (0..256) */
-static uint32_t g_write_pos = 0;     /* bytes written to data area (excl. header page) */
-static uint32_t g_last_time_ms = 0;
-static bool     g_have_anchor = false;
+#define LOG_MAGIC 0x31474F4Cu /* 'LOG1' */
 
-/* XIP helpers */
-static inline const log_header_t *xip_hdr_active(void)  { return (const log_header_t *)(LOG_XIP_BASE); }
-static inline const uint8_t      *xip_data_active(void) { return (const uint8_t *)(LOG_XIP_BASE + FLASH_PAGE_SIZE); }
-static inline const log_header_t *xip_hdr_backup(void)  { return (const log_header_t *)(BACKUP_XIP_BASE); }
-static inline const uint8_t      *xip_data_backup(void) { return (const uint8_t *)(BACKUP_XIP_BASE + FLASH_PAGE_SIZE); }
+/* Flash/XIP layout */
+#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#define LOG_FLASH_OFFSET      (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE)
+#define LOG_XIP_BASE          (XIP_BASE + LOG_FLASH_OFFSET)
 
-void dump_active(void) {
-    uint32_t n = bmp388_storage_count();
-    printf("\n# ACTIVE index,time_ms,temp_C\n");
-    for (uint32_t i=0;i<n;i++) {
-        uint32_t t; float temp;
-        if (bmp388_storage_read(i, &t, &temp) == 0)
-            printf("%lu,%lu,%.2f\n", (unsigned long)i, (unsigned long)t, temp);
+/* ===== XIP helpers ===== */
+static inline const log_header_t *xip_hdr_active(void)   { return (const log_header_t *)(LOG_XIP_BASE); }
+static inline const uint8_t      *xip_data_active(void)  { return (const uint8_t *)(LOG_XIP_BASE + FLASH_PAGE_SIZE); }
+
+/* ===== Compact-bit blob region (for saving dump_active_compact_bit output) ===== */
+#ifndef COMPACT_REGION_SIZE
+#define COMPACT_REGION_SIZE   (32 * 1024)  /* adjust if you need more/less */
+#endif
+#define COMPACT_FLASH_OFFSET  (PICO_FLASH_SIZE_BYTES - LOG_REGION_SIZE - COMPACT_REGION_SIZE)
+#define COMPACT_XIP_BASE      (XIP_BASE + COMPACT_FLASH_OFFSET)
+
+const uint32_t CB_MAGIC = 0x43424954u; /* 'CBIT' */
+
+const compact_hdr_t *xip_hdr_compact(void) {
+    return (const compact_hdr_t *)(COMPACT_XIP_BASE);
+}
+const uint8_t *xip_data_compact(void) {
+    return (const uint8_t *)(COMPACT_XIP_BASE + FLASH_PAGE_SIZE);
+}
+
+/* ===== ACTIVE in-RAM mirror for robust dumping ===== */
+typedef struct {
+    uint32_t t_ms[RAMLOG_CAP];
+    float    temp[RAMLOG_CAP];
+    bool     exc[RAMLOG_CAP]; 
+    uint32_t head;    /* oldest index */
+    uint32_t count;   /* number of valid items (<= RAMLOG_CAP) */
+} ramlog_t;
+
+static struct {
+    log_header_t hdr;         /* cached header */
+    uint32_t     write_pos;   /* byte offset after header where next record goes */
+    uint8_t      page_buf[FLASH_PAGE_SIZE];
+    uint32_t     page_fill;
+    uint32_t     last_time_ms;
+} g;
+
+static ramlog_t g_ram = { .head = 0, .count = 0 };
+
+/* ===== Bucket & compact opcodes ===== */
+#define OPC_TS   0xF0
+#define OPC_E    0xE5
+#define OPC_END  0xEE
+
+/* ===== Bucket mapper: 0.5 °C buckets centered at 22.5..28.0.. =====
+ * 0..12 covering [22.25, 28.25], clamp outside.
+ */
+static inline uint8_t bucket_0p5_22_28(float t) {
+    float f = (t - 22.5f) * 2.0f + 1.0f;  /* 22.5->1, 23.0->2, 23.5->3 ... */
+    int b = (int)(f + 0.0f);
+    if (b < 0) b = 0;
+    if (b > 12) b = 12;
+    return (uint8_t)b;
+}
+
+static inline void ramlog_add(uint32_t t_ms, float temp, bool exc_now) {
+    uint32_t pos;
+    if (g_ram.count < RAMLOG_CAP) {
+        pos = (g_ram.head + g_ram.count) % RAMLOG_CAP;
+        g_ram.count++;
+    } else {
+        pos = g_ram.head;
+        g_ram.head = (g_ram.head + 1) % RAMLOG_CAP;
     }
-    printf("# ACTIVE total %lu\n\n", (unsigned long)n);
-}
-void dump_backup(void) {
-    uint32_t n = bmp388_backup_count();
-    printf("\n# BACKUP index,time_ms,temp_C\n");
-    for (uint32_t i=0;i<n;i++) {
-        uint32_t t; float temp;
-        if (bmp388_backup_read(i, &t, &temp) == 0)
-            printf("%lu,%lu,%.2f\n", (unsigned long)i, (unsigned long)t, temp);
-    }
-    printf("# BACKUP total %lu\n\n", (unsigned long)n);
+    g_ram.t_ms[pos] = t_ms;
+    g_ram.temp[pos] = temp;
+    g_ram.exc[pos]  = exc_now;   // <-- NEW
 }
 
-/* Flash helpers */
-static void flash_program_block(uint32_t flash_off, const void *data, size_t len) {
-    uint32_t irq = save_and_disable_interrupts();
-    flash_range_program(flash_off, (const uint8_t*)data, len);
-    restore_interrupts(irq);
-}
-static void flash_erase_sectors(uint32_t flash_off, size_t len) {
-    uint32_t irq = save_and_disable_interrupts();
-    flash_range_erase(flash_off, len);
-    restore_interrupts(irq);
-}
-static void write_header_to_flash_active(const log_header_t *h) {
-    uint8_t page[FLASH_PAGE_SIZE];
-    memset(page, 0xFF, sizeof page);
-    memcpy(page, h, sizeof *h);
-    flash_program_block(LOG_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
-}
-static void write_header_to_flash_backup(const log_header_t *h) {
-    uint8_t page[FLASH_PAGE_SIZE];
-    memset(page, 0xFF, sizeof page);
-    memcpy(page, h, sizeof *h);
-    flash_program_block(BACKUP_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
+static inline uint32_t ramlog_count(void) { return g_ram.count; }
+static inline void ramlog_get(uint32_t i, uint32_t *t_ms, float *temp, bool *exc) {
+    uint32_t pos = (g_ram.head + i) % RAMLOG_CAP;
+    if (t_ms) *t_ms = g_ram.t_ms[pos];
+    if (temp) *temp = g_ram.temp[pos];
+    if (exc)  *exc  = g_ram.exc[pos];   // <-- NEW
 }
 
-/* ===== ACTIVE region: reset/erase/init ===== */
-static void storage_reset_state_after_erase(void) {
-    memset(&g_hdr, 0, sizeof g_hdr);
-    g_hdr.magic          = LOG_MAGIC;
-    g_hdr.version        = LOG_VERSION;
-    g_hdr.capacity_bytes = LOG_REGION_SIZE - FLASH_PAGE_SIZE; /* header occupies first page */
-    g_hdr.count          = 0;
-    g_hdr.base_time_ms   = 0;
-
-    g_write_pos = 0;
-    g_page_fill = 0;
-    g_last_time_ms = 0;
-    g_have_anchor = false;
-
-    memset(g_page_buf, 0xFF, sizeof g_page_buf);
-    write_header_to_flash_active(&g_hdr);
-}
-
-/* ==== Public storage API ==== */
-void bmp388_storage_erase_all(void) {
-    flash_erase_sectors(LOG_FLASH_OFFSET, LOG_REGION_SIZE);
-    storage_reset_state_after_erase();
-}
-
-void bmp388_storage_init(bool erase_all) {
-    if (BACKUP_FLASH_OFFSET < XIP_BASE) {
-        /* If firmware grows too large, reduce LOG_REGION_SIZE. */
-    }
-
+/* ===== ACTIVE header/cache ===== */
+static void hdr_load_or_init(void) {
     const log_header_t *h = xip_hdr_active();
-    bool ok = (h->magic == LOG_MAGIC) && (h->version == LOG_VERSION);
-    if (erase_all || !ok) { bmp388_storage_erase_all(); return; }
-
-    g_hdr = *h;
-    g_write_pos = g_hdr.count * RECORD_SIZE;
-    g_page_fill = g_write_pos % FLASH_PAGE_SIZE;
-    memset(g_page_buf, 0xFF, sizeof g_page_buf);
-
-    g_have_anchor  = (g_hdr.count > 0) || (g_hdr.base_time_ms != 0);
-    g_last_time_ms = g_hdr.base_time_ms;
-
-    /* Rebuild last_time_ms by walking committed pages + RAM tail */
-    if (g_hdr.count > 0) {
-        uint32_t t = g_hdr.base_time_ms;
-        uint32_t full_pages = g_hdr.count / RECORDS_PER_PAGE;
-        uint32_t rem        = g_hdr.count % RECORDS_PER_PAGE;
-
-        for (uint32_t p = 0; p < full_pages; ++p) {
-            const log_rec4_t *pg = (const log_rec4_t *)(xip_data_active() + p * FLASH_PAGE_SIZE);
-            for (uint32_t i=0;i<RECORDS_PER_PAGE;i++) t += (uint32_t)pg[i].dtime_10ms * 10u;
-        }
-        if (rem) {
-            const log_rec4_t *pg = (const log_rec4_t *)(xip_data_active() + full_pages * FLASH_PAGE_SIZE);
-            for (uint32_t i=0;i<rem;i++) t += (uint32_t)pg[i].dtime_10ms * 10u;
-        }
-        g_last_time_ms = t;
+    if (h->magic != LOG_MAGIC) {
+        log_header_t nh = { .magic = LOG_MAGIC, .count = 0 };
+        flash_erase_sectors(LOG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+        flash_program_block(LOG_FLASH_OFFSET, &nh, FLASH_PAGE_SIZE);
+        g.hdr = nh;
+        g.write_pos = 0;
+        g.page_fill = 0;
+        g.last_time_ms = 0;
+        memset(g.page_buf, 0xFF, sizeof g.page_buf);
+        return;
     }
+    g.hdr = *h;
+    g.write_pos = g.hdr.count * sizeof(log_rec4_t);
+    g.page_fill = 0;
+    g.last_time_ms = 0;
+    memset(g.page_buf, 0xFF, sizeof g.page_buf);
 }
 
-static int flush_page_if_full(void) {
-    if (g_page_fill < FLASH_PAGE_SIZE) return 0;
-
-    uint32_t bytes_before_this_page = g_write_pos - FLASH_PAGE_SIZE;
-    uint32_t page_index = bytes_before_this_page / FLASH_PAGE_SIZE;
-    uint32_t flash_off = LOG_FLASH_OFFSET + FLASH_PAGE_SIZE + page_index * FLASH_PAGE_SIZE;
-
-    flash_program_block(flash_off, g_page_buf, FLASH_PAGE_SIZE);
-    memset(g_page_buf, 0xFF, sizeof g_page_buf);
-    g_page_fill = 0;
-
-    /* persist header (count) after each page flush */
-    write_header_to_flash_active(&g_hdr);
+int bmp388_storage_init(void) {
+    hdr_load_or_init();
     return 0;
 }
 
-/* ===== BACKUP helpers ===== */
-static void backup_copy_active_to_backup(void) {
-    uint32_t used_bytes = g_write_pos;                  // data bytes (excl. header page)
-    uint32_t used_pages = (used_bytes + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE;
-
-    flash_erase_sectors(BACKUP_FLASH_OFFSET, LOG_REGION_SIZE);
-
-    /* Copy committed pages */
-    const uint8_t *active_data = xip_data_active();
-    for (uint32_t p = 0; p < (used_pages ? (used_pages - 1) : 0); ++p) {
-        const uint8_t *src_page = active_data + p * FLASH_PAGE_SIZE;
-        uint32_t dst_off = BACKUP_FLASH_OFFSET + FLASH_PAGE_SIZE + p * FLASH_PAGE_SIZE;
-        flash_program_block(dst_off, src_page, FLASH_PAGE_SIZE);
-    }
-
-    /* Last page = page-aligned or RAM tail */
-    if (used_pages > 0) {
-        uint32_t last_page_index = used_pages - 1;
-        uint32_t dst_off = BACKUP_FLASH_OFFSET + FLASH_PAGE_SIZE + last_page_index * FLASH_PAGE_SIZE;
-
-        if ((g_page_fill == 0) && (used_bytes != 0)) {
-            const uint8_t *src_page = active_data + last_page_index * FLASH_PAGE_SIZE;
-            flash_program_block(dst_off, src_page, FLASH_PAGE_SIZE);
-        } else if (g_page_fill > 0) {
-            uint8_t page[FLASH_PAGE_SIZE];
-            memset(page, 0xFF, sizeof page);
-            memcpy(page, g_page_buf, g_page_fill);
-            flash_program_block(dst_off, page, FLASH_PAGE_SIZE);
-        }
-    }
-
-    /* Write BACKUP header last */
-    log_header_t bh = g_hdr;
-    write_header_to_flash_backup(&bh);
+uint32_t bmp388_storage_count(void) {
+    return g.hdr.count;
 }
 
-/* ==== Public BACKUP ops ==== */
-void bmp388_storage_rotate_to_backup(void) {
-    backup_copy_active_to_backup();
-    bmp388_storage_erase_all();
+/* Flush buffered page to flash ACTIVE data area */
+static int flush_page_if_full(void) {
+    if (g.page_fill == 0) return 0;
+    uint32_t off = LOG_FLASH_OFFSET + FLASH_PAGE_SIZE + g.write_pos - g.page_fill;
+    flash_program_block(off, g.page_buf, FLASH_PAGE_SIZE);
+    g.page_fill = 0;
+    memset(g.page_buf, 0xFF, sizeof g.page_buf);
+    /* Update header count */
+    flash_program_block(LOG_FLASH_OFFSET, &g.hdr, FLASH_PAGE_SIZE);
+    return 0;
 }
 
-void bmp388_backup_clear(void) {
-    flash_erase_sectors(BACKUP_FLASH_OFFSET, LOG_REGION_SIZE);
-    log_header_t h = {0};
-    h.magic = LOG_MAGIC; h.version = LOG_VERSION;
-    h.capacity_bytes = LOG_REGION_SIZE - FLASH_PAGE_SIZE;
-    h.count = 0; h.base_time_ms = 0;
-    write_header_to_flash_backup(&h);
-}
-
-uint32_t bmp388_backup_count(void) {
-    const log_header_t *bh = xip_hdr_backup();
-    if (bh->magic != LOG_MAGIC || bh->version != LOG_VERSION) return 0;
-    return bh->count;
-}
-
-int bmp388_backup_read(uint32_t index, uint32_t *out_ms, float *out_temp) {
-    const log_header_t *bh = xip_hdr_backup();
-    if (bh->magic != LOG_MAGIC || bh->version != LOG_VERSION) return -1;
-    if (index >= bh->count) return -2;
-
-    uint32_t t = bh->base_time_ms;
-    uint32_t full_pages = bh->count / RECORDS_PER_PAGE;
-    uint32_t committed_records = full_pages * RECORDS_PER_PAGE;
-
-    if (index < committed_records) {
-        uint32_t page_index = index / RECORDS_PER_PAGE;
-        uint32_t in_page    = index % RECORDS_PER_PAGE;
-
-        for (uint32_t i=0;i<page_index;i++) {
-            const log_rec4_t *pg = (const log_rec4_t *)(xip_data_backup() + i * FLASH_PAGE_SIZE);
-            for (uint32_t j=0;j<RECORDS_PER_PAGE;j++) t += (uint32_t)pg[j].dtime_10ms * 10u;
-        }
-        const log_rec4_t *pg = (const log_rec4_t *)(xip_data_backup() + page_index * FLASH_PAGE_SIZE);
-        for (uint32_t j=0;j<=in_page;j++)           t += (uint32_t)pg[j].dtime_10ms * 10u;
-
-        if (out_ms)   *out_ms   = t;
-        if (out_temp) *out_temp = (float)pg[in_page].temp_c_centi / 100.0f;
-        return 0;
-    } else {
-        uint32_t tail_idx = index - committed_records;
-        const log_rec4_t *pg_last = (const log_rec4_t *)(xip_data_backup() + full_pages * FLASH_PAGE_SIZE);
-
-        for (uint32_t i=0;i<full_pages;i++) {
-            const log_rec4_t *pg = (const log_rec4_t *)(xip_data_backup() + i * FLASH_PAGE_SIZE);
-            for (uint32_t j=0;j<RECORDS_PER_PAGE;j++) t += (uint32_t)pg[j].dtime_10ms * 10u;
-        }
-        for (uint32_t j=0;j<=tail_idx;j++)          t += (uint32_t)pg_last[j].dtime_10ms * 10u;
-
-        if (out_ms)   *out_ms   = t;
-        if (out_temp) *out_temp = (float)pg_last[tail_idx].temp_c_centi / 100.0f;
-        return 0;
-    }
-}
-
-/* ==== ACTIVE append/read ==== */
+/* Append record to ACTIVE (and mirror to RAM) */
 int bmp388_storage_append(uint32_t time_ms, float temperature_c) {
-    if (!g_have_anchor) {
-        g_hdr.base_time_ms = time_ms;
-        g_last_time_ms     = time_ms;
-        g_have_anchor      = true;
-        write_header_to_flash_active(&g_hdr);
+    /* Page-full handling */
+    if ((g.write_pos + sizeof(log_rec4_t)) > (LOG_REGION_SIZE - FLASH_PAGE_SIZE)) {
+        /* ACTIVE full: just stop appending (or rotate if you still use BACKUP) */
+        return -1;
     }
 
-    if (g_write_pos + RECORD_SIZE > g_hdr.capacity_bytes) {
-        backup_copy_active_to_backup();
-        bmp388_storage_erase_all();
-        return -1; /* rotated because full */
-    }
-
-    uint32_t delta_ms = (time_ms >= g_last_time_ms) ? (time_ms - g_last_time_ms) : 0;
-    uint32_t delta_10 = delta_ms / 10u;  if (delta_10 > 0xFFFFu) delta_10 = 0xFFFFu;
+    uint32_t delta_ms = (g.last_time_ms <= time_ms) ? (time_ms - g.last_time_ms) : 0;
+    uint32_t delta_10 = delta_ms / 10u; if (delta_10 > 0xFFFFu) delta_10 = 0xFFFFu;
 
     int32_t t_centi = (int32_t)(temperature_c * 100.0f);
     if (t_centi >  32767) t_centi =  32767;
     if (t_centi < -32768) t_centi = -32768;
 
-    log_rec4_t rec;
-    rec.dtime_10ms   = (uint16_t)delta_10;
-    rec.temp_c_centi = (int16_t)t_centi;
+    log_rec4_t rec = { .dtime_10ms = (uint16_t)delta_10, .temp_c_centi = (int16_t)t_centi };
 
-    memcpy(&g_page_buf[g_page_fill], &rec, sizeof rec);
-    g_page_fill  += sizeof rec;
-    g_write_pos  += sizeof rec;
-    g_hdr.count  += 1;
-    g_last_time_ms = g_last_time_ms + (uint32_t)rec.dtime_10ms * 10u;
+    memcpy(&g.page_buf[g.page_fill], &rec, sizeof rec);
+    g.page_fill  += sizeof rec;
+    g.write_pos  += sizeof rec;
+    g.hdr.count  += 1;
+    g.last_time_ms = g.last_time_ms + (uint32_t)rec.dtime_10ms * 10u;
 
-    return flush_page_if_full();
-}
+    bool exc_now = bmp388_excursion_state();     // <-- NEW (from sensor driver)
+    ramlog_add(time_ms, temperature_c, exc_now); // <-- pass it into RAM mirror
 
-uint32_t bmp388_storage_count(void) {
-    return g_hdr.count;
-}
-
-int bmp388_storage_read(uint32_t index, uint32_t *out_ms, float *out_temp) {
-    if (index >= g_hdr.count) return -1;
-
-    uint32_t t = g_hdr.base_time_ms;
-    uint32_t full_pages = g_hdr.count / RECORDS_PER_PAGE;
-    uint32_t committed_records = full_pages * RECORDS_PER_PAGE;
-
-    if (index < committed_records) {
-        uint32_t page_index = index / RECORDS_PER_PAGE;
-        uint32_t in_page    = index % RECORDS_PER_PAGE;
-
-        for (uint32_t i=0;i<page_index;i++) {
-            const log_rec4_t *pg = (const log_rec4_t *)(xip_data_active() + i * FLASH_PAGE_SIZE);
-            for (uint32_t j=0;j<RECORDS_PER_PAGE;j++) t += (uint32_t)pg[j].dtime_10ms * 10u;
-        }
-        const log_rec4_t *pg = (const log_rec4_t *)(xip_data_active() + page_index * FLASH_PAGE_SIZE);
-        for (uint32_t j=0;j<=in_page;j++)            t += (uint32_t)pg[j].dtime_10ms * 10u;
-
-        if (out_ms)   *out_ms   = t;
-        if (out_temp) *out_temp = (float)pg[in_page].temp_c_centi / 100.0f;
-        return 0;
-    }
-
-    uint32_t tail_idx = index - committed_records;
-    const log_rec4_t *pg = (const log_rec4_t *)g_page_buf;
-
-    for (uint32_t i=0;i<full_pages;i++) {
-        const log_rec4_t *pgc = (const log_rec4_t *)(xip_data_active() + i * FLASH_PAGE_SIZE);
-        for (uint32_t j=0;j<RECORDS_PER_PAGE;j++) t += (uint32_t)pgc[j].dtime_10ms * 10u;
-    }
-    for (uint32_t j=0;j<=tail_idx;j++) t += (uint32_t)pg[j].dtime_10ms * 10u;
-
-    if (out_ms)   *out_ms   = t;
-    if (out_temp) *out_temp = (float)pg[tail_idx].temp_c_centi / 100.0f;
+    /* Flush when the buffer reaches a page boundary */
+    if (g.page_fill >= FLASH_PAGE_SIZE) return flush_page_if_full();
     return 0;
 }
 
-/* ===== Compact dumps (unchanged API) ===== */
-
-/* Text dump of ACTIVE in 5-bucket ranges with timestamp every 50 samples */
-static int bucket_5(float c) {
-    if (c < 22.0f) return 0;
-    if (c < 24.0f) return 1;
-    if (c < 26.0f) return 2;
-    if (c < 28.0f) return 3;
-    return 4;
-}
-void dump_active_compact(void) {
-    uint32_t n = bmp388_storage_count();
-    if (n == 0) { printf("# no ACTIVE records\n"); return; }
-
-    bool have_prev      = false;   // have we printed at least one sample?
-    bool prev_exc       = false;   // previous excursion state (valid only if have_prev)
-    bool first_in_block = true;    // comma control within the current 50-sample block
-
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t t_ms; float temp;
-        if (bmp388_storage_read(i, &t_ms, &temp) != 0) continue;
-
-        // Block header every 50 samples (DON'T reset excursion state)
-        if ((i % 50) == 0) {
-            printf("\n*timestamp* %lu\n", (unsigned long)t_ms);
-            first_in_block = true;  // only for commas
+/* Optional: read from ACTIVE by replaying deltas (kept for compatibility) */
+int bmp388_storage_read(uint32_t index, uint32_t *out_ms, float *out_temp) {
+    if (index >= g.hdr.count) return -1;
+    /* Simple linear walk (compact driver prefers RAM mirror anyway) */
+    const uint8_t *p = xip_data_active();
+    uint32_t t_ms = 0;
+    for (uint32_t i = 0; i <= index; i++) {
+        const log_rec4_t *r = (const log_rec4_t *)&p[i * sizeof(log_rec4_t)];
+        t_ms += (uint32_t)r->dtime_10ms * 10u;
+        if (i == index) {
+            if (out_ms) *out_ms = t_ms;
+            if (out_temp) *out_temp = ((float)r->temp_c_centi) / 100.0f;
         }
-
-        bool exc = is_excursion(temp);
-        int  b   = bucket_5(temp);
-
-        if (!have_prev) {
-            // First sample of the whole dump: no 'e' at start by requirement
-            if (!first_in_block) printf(",");
-            printf("%d", b);
-            first_in_block = false;
-
-            have_prev = true;
-            prev_exc  = exc;  // establish baseline state for later transitions
-            continue;
-        }
-
-        // Emit 'e' exactly when excursion state flips (normal<->excursion)
-        if (exc != prev_exc) {
-            if (!first_in_block) printf(",");
-            printf("e");
-            first_in_block = false;
-            prev_exc = exc;  // update state AFTER marking the transition
-        }
-
-        // Emit current bucket
-        if (!first_in_block) printf(",");
-        printf("%d", b);
-        first_in_block = false;
     }
-    printf("\n");
+    return 0;
 }
 
-
-
-/* Binary, masked, timestamp-every-50 compact dump (3-bit buckets) */
-static uint8_t temp_to_bucket5(float temp) {
-    if (temp < 22.0f) return 0;
-    if (temp < 24.0f) return 1;
-    if (temp < 26.0f) return 2;
-    if (temp < 28.0f) return 3;
-    return 4;
+void bmp388_storage_erase_all(void) {
+    flash_erase_sectors(LOG_FLASH_OFFSET, LOG_REGION_SIZE);
+    hdr_load_or_init();
 }
-/* Binary, masked, timestamp-every-50 compact dump WITH inline 'e' markers */
-#define OPC_TS   0xF0  // timestamp
-#define OPC_E    0xE5  // inline 'e' toggle
-#define OPC_END  0xEE  // end
 
-#define OPC_TS   0xF0
-#define OPC_E    0xE5
-#define OPC_END  0xEE
+/* ===== Shared compact-bit encoder (callback-based, single source of truth) ===== */
+typedef void (*cbit_emit_fn)(uint8_t byte, void *ctx);
+static inline void emit_byte(cbit_emit_fn f, void *ctx, uint8_t b, size_t *ctr) { f(b, ctx); (*ctr)++; }
 
-void dump_active_compact_bit(void) {
-    uint32_t n = bmp388_storage_count();
+static inline uint8_t bucket_0p5_22_28(float c);
 
-    putchar_raw(0xC1); putchar_raw(0x01);
-    putchar_raw((uint8_t)(n & 0xFF));
-    putchar_raw((uint8_t)(n >> 8));
-    putchar_raw(0x05);
+size_t bmp388_compact_encode(cbit_emit_fn emit, void *ctx) {
+    size_t out = 0;
+    const uint32_t n = ramlog_count();
 
-    uint8_t cur = 0; int bits = 0;
-    bool have_prev = false, prev_exc = false;
+    // Header (unchanged)
+    emit_byte(emit, ctx, 0xC1, &out);
+    emit_byte(emit, ctx, 0x01, &out);
+    emit_byte(emit, ctx, (uint8_t)(n & 0xFF), &out);
+    emit_byte(emit, ctx, (uint8_t)(n >> 8),   &out);
+    emit_byte(emit, ctx, 13,                  &out);
+
+    if (n == 0) { emit_byte(emit, ctx, 0xEE, &out); return out; }
+
+    // First TS marker
+    uint32_t t0_ms; float t0c; bool e0;
+    ramlog_get(0, &t0_ms, &t0c, &e0);
+    emit_byte(emit, ctx, 0xF0, &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms),       &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms >> 8),  &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms >> 16), &out);
+    emit_byte(emit, ctx, (uint8_t)(t0_ms >> 24), &out);
+
+    bool prev_exc = e0;             // <-- use recorded driver state
+    bool high_nibble = true;
+    uint8_t acc = 0;
 
     for (uint32_t i = 0; i < n; i++) {
-        uint32_t t_ms; float temp;
-        if (bmp388_storage_read(i, &t_ms, &temp) != 0) continue;
+        uint32_t t_ms; float temp; bool exc;
+        ramlog_get(i, &t_ms, &temp, &exc);  // <-- read recorded flag
 
-        // Timestamp every 50 samples (byte-aligned)
-        if ((i % 50) == 0) {
-            if (bits > 0) { putchar_raw(cur); cur = 0; bits = 0; }
-            putchar_raw(OPC_TS);
-            putchar_raw((uint8_t)(t_ms)); putchar_raw((uint8_t)(t_ms>>8));
-            putchar_raw((uint8_t)(t_ms>>16)); putchar_raw((uint8_t)(t_ms>>24));
-
-            // NEW: if we were already in excursion, emit a reminder 'e' opcode
-            if (have_prev && prev_exc) {
-                // already byte-aligned
-                putchar_raw(OPC_E);
-            }
-        }
-
-        bool exc = (temp < 2.0f) || (temp > 8.0f);
-
-        if (!have_prev) {
-            have_prev = true;
-            prev_exc  = exc;    // no 'e' at very start
-        } else if (exc != prev_exc) {
-            if (bits > 0) { putchar_raw(cur); cur = 0; bits = 0; }
-            putchar_raw(OPC_E);
+        // If excursion flag toggled since last sample, emit E (flush any half-byte first)
+        if (exc != prev_exc) {
+            if (!high_nibble) { emit_byte(emit, ctx, acc, &out); acc = 0; high_nibble = true; }
+            emit_byte(emit, ctx, 0xE5, &out);   // OPC_E
             prev_exc = exc;
         }
 
-        uint8_t b = temp_to_bucket5(temp) & 0x07;
-        cur |= (uint8_t)(b << bits);
-        bits += 3;
-        if (bits >= 8) {
-            putchar_raw(cur);
-            bits -= 8;
-            cur = (bits > 0) ? (uint8_t)(b >> (3 - bits)) : 0;
-        }
+        // Bucket encode (unchanged; map to 0..12 then pack 2 samples per byte)
+        uint8_t b = bucket_0p5_22_28(temp) & 0x0F;
+        if (high_nibble) { acc = (uint8_t)(b << 4); high_nibble = false; }
+        else { acc |= b; emit_byte(emit, ctx, acc, &out); acc = 0; high_nibble = true; }
     }
 
-    if (bits > 0) putchar_raw(cur);
-    putchar_raw(OPC_END);
+    if (!high_nibble) emit_byte(emit, ctx, acc, &out);
+    emit_byte(emit, ctx, 0xEE, &out);   // OPC_END
+    return out;
+}
+
+/* UART dumper via the same encoder */
+static void uart_emit(uint8_t b, void *ctx) { (void)ctx; putchar_raw(b); }
+void dump_active_compact_bit(void) {
+    (void)bmp388_compact_encode(uart_emit, NULL);
+}
+
+/* ===== Save exact compact stream to flash and dump back raw ===== */
+void bmp388_backup_compact_save(void) {
+    static uint8_t staging[COMPACT_REGION_SIZE - FLASH_PAGE_SIZE];
+    struct { uint8_t *p; size_t cap; size_t w; } bc = { staging, sizeof(staging), 0 };
+    void buf_emit(uint8_t b, void *v) {
+        struct { uint8_t *p; size_t cap; size_t w; } *ctx = v;
+        if (ctx->w < ctx->cap) ctx->p[ctx->w++] = b;
+    }
+
+    (void)bmp388_compact_encode(buf_emit, &bc);
+
+    /* Erase region and write header + data */
+    flash_erase_sectors(COMPACT_FLASH_OFFSET, COMPACT_REGION_SIZE);
+
+    compact_hdr_t hdr;
+    memset(&hdr, 0xFF, sizeof hdr);
+    hdr.magic  = CB_MAGIC;
+    hdr.length = (uint32_t)bc.w;
+    flash_program_block(COMPACT_FLASH_OFFSET, &hdr, FLASH_PAGE_SIZE);
+
+    uint32_t written = 0;
+    while (written < hdr.length) {
+        uint8_t page[FLASH_PAGE_SIZE];
+        size_t chunk = (hdr.length - written > FLASH_PAGE_SIZE) ? FLASH_PAGE_SIZE : (hdr.length - written);
+        memset(page, 0xFF, sizeof page);
+        memcpy(page, &staging[written], chunk);
+        uint32_t dst = COMPACT_FLASH_OFFSET + FLASH_PAGE_SIZE + written;
+        flash_program_block(dst, page, FLASH_PAGE_SIZE);
+        written += (uint32_t)chunk;
+    }
+    printf("[COMPACT] Saved %u bytes to flash.\n", (unsigned)hdr.length);
+}
+
+void dump_backup_compact_raw(void) {
+    const compact_hdr_t *h = xip_hdr_compact();
+    if (h->magic != CB_MAGIC) { printf("[COMPACT] No blob found.\n"); return; }
+    const uint8_t *p = xip_data_compact();
+    for (uint32_t i=0;i<h->length;i++) putchar_raw(p[i]);
+    printf("\n[COMPACT] Dumped %u bytes.\n", (unsigned)h->length);
 }

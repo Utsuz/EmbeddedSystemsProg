@@ -1,15 +1,27 @@
-add_executable(bmp388
-    bmp388.c
-    sensor_driver.c       # NEW: sensor-only module
-    storage_driver.c      # NEW: storage-only module
+add_library(bmp388_core STATIC
+    sensor_driver.c
+    storage_driver.c
+    flash_helpers.c
     bmp388_driver.h
+    flash_helpers.h
 )
 
-target_include_directories(bmp388 PUBLIC ${CMAKE_CURRENT_LIST_DIR})
-target_link_libraries(bmp388
+target_include_directories(bmp388_core PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(bmp388_core
     pico_stdlib
     hardware_i2c
     hardware_adc
+    hardware_flash
+)
+
+add_executable(bmp388
+    bmp388.c
+)
+
+# Link the executable against the new core library
+target_link_libraries(bmp388
+    bmp388_core
+    pico_stdlib
 )
 
 pico_enable_stdio_usb(bmp388 1)

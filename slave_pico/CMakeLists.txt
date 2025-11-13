@@ -6,11 +6,13 @@ target_link_libraries(slave_pico
     pico_stdlib
     uart_driver
     activation_driver
+    bmp388_core
 )
 
 target_include_directories(slave_pico PRIVATE
     ${CMAKE_SOURCE_DIR}/../uart_driver
     ${CMAKE_SOURCE_DIR}/../activation_driver
+    ${CMAKE_SOURCE_DIR}/../bmp388
 )
 
 pico_enable_stdio_usb(slave_pico 1)
