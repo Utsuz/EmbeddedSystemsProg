@@ -68,7 +68,7 @@ static uint32_t dump_compact_to_uart(void) {
     snprintf(msg, sizeof(msg), "LENGTH %u\n", (unsigned)length);
     activation_send(msg);
 
-    sleep_ms(100);  
+    sleep_ms(250);  
 
     printf("[Slave] Sending %u bytes of compact data...\n", (unsigned)length);
 

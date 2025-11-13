@@ -241,6 +241,16 @@ static void uart_activation_task(void *pvParameters) {
                             state = STATE_IDLE;
                             break;
                         }
+                        
+                        // Fix:Buffer Flush before Binary Read
+                        int flushed_count = 0;
+                        while (uart_driver_available()) {
+                          uart_driver_read_byte();
+                          flushed_count++;
+                        }
+                        if (flushed_count > 0) {
+                          printf("[Master] WARN: Flushed %d bytes from UART buffer before binary read.\n", flushed_count);
+                        }
 
                         // 2. Start Binary Data Reception
                         uint32_t received_count = 0;
