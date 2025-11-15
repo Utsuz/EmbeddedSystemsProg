@@ -1,5 +1,4 @@
 #include "pico/stdlib.h"
-#include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "FreeRTOS.h" 
 #include "task.h"
@@ -23,7 +22,8 @@
 #define UART_TX_PIN     8
 #define UART_RX_PIN     9
 #define UART_BAUDRATE   115200
-#define BTN_PIN         20
+#define BTN_PIN         20 // Existing button for requesting data from Slave
+#define DUMP_BTN_PIN    21 // NEW: Button for dumping saved data to PC via USB
 #define TIMEOUT_MS      5000
 
 #define NTP_REFRESH_INTERVAL_MS   (10 * 60 * 1000)  // 10 minutes
@@ -58,7 +58,21 @@ static absolute_time_t last_sync_time;
 static uint8_t received_data_buffer[MAX_COMPACT_DUMP_SIZE];
 static uint32_t received_data_length = 0;
 
-// Master Save Function
+// Helper to get XIP pointer for the header
+static inline const master_dump_hdr_t *xip_hdr_master_dump(void) {
+    return (const master_dump_hdr_t *)(MASTER_DUMP_XIP_BASE);
+}
+
+// Helper to get XIP pointer for the data
+static inline const uint8_t *xip_data_master_dump(void) {
+    return (const uint8_t *)(MASTER_DUMP_XIP_BASE + FLASH_PAGE_SIZE);
+}
+
+// Prototype for the dump function
+static void master_dump_saved_data(void);
+
+
+// Master Save Function (unchanged)
 void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     if (length == 0 || length > MASTER_DUMP_REGION_SIZE - FLASH_PAGE_SIZE) {
         printf("[Master Flash] ERROR: Data length (%u) invalid or too large.\n", (unsigned)length);
@@ -83,6 +97,7 @@ void master_save_compact_dump(const uint8_t *data, uint32_t length) {
         memset(page, 0xFF, sizeof page);
         memcpy(page, &data[written], chunk);
 
+        // Calculate destination address carefully: Offset + Header Page Size + already written data
         uint32_t dst = MASTER_DUMP_FLASH_OFFSET + FLASH_PAGE_SIZE + written;
         flash_program_block(dst, page, FLASH_PAGE_SIZE);
         written += (uint32_t)chunk;
@@ -91,7 +106,51 @@ void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     printf("[Master Flash] SUCCESS: Saved %u bytes to flash offset 0x%X.\n", (unsigned)length, (unsigned)MASTER_DUMP_FLASH_OFFSET);
 }
 
-// FreeRTOS Wi-Fi + NTP
+
+// --- NEW: Function to read saved data from flash and dump it over USB ---
+static void master_dump_saved_data(void) {
+    // 1. Check USB connection (optional but good practice)
+    if (!usb_is_connected()) {
+        printf("[Master Dump] USB not connected. Aborting dump.\n");
+        return;
+    }
+    
+    // 2. Read the header from flash via XIP
+    const master_dump_hdr_t *h = xip_hdr_master_dump();
+
+    if (h->magic != MASTER_DUMP_MAGIC) {
+        printf("[Master Dump] No valid data blob found in flash (Magic: 0x%X).\n", (unsigned)h->magic);
+        usb_send("[DUMP] No valid data found in flash.\n");
+        return;
+    }
+
+    const uint32_t length = h->length;
+    if (length == 0 || length > (MASTER_DUMP_REGION_SIZE - FLASH_PAGE_SIZE)) {
+        printf("[Master Dump] Invalid data length: %u bytes.\n", (unsigned)length);
+        usb_send("[DUMP] Invalid data length recorded.\n");
+        return;
+    }
+
+    printf("[Master Dump] Dumping %u bytes of compact data over USB...\n", (unsigned)length);
+    
+    // 3. Send a descriptive header message over USB
+    char info_msg[128];
+    // NOTE: This text preamble allows the receiving application (on the PC) to know 
+    // when the raw binary data starts and how long it should be.
+    snprintf(info_msg, sizeof(info_msg), "\n[DUMP_START] Compact blob size: %u bytes.\n", (unsigned)length);
+    usb_send(info_msg);
+    
+    // 4. Send the raw binary data
+    const uint8_t *data_ptr = xip_data_master_dump();
+    usb_send_raw(data_ptr, length);
+    
+    // 5. Send a termination message
+    usb_send("\n[DUMP_END] Transfer complete.\n\n");
+    printf("[Master Dump] Dump successful.\n");
+}
+
+
+// FreeRTOS Wi-Fi + NTP Task (unchanged)
 static void wifi_ntp_task(void *pvParameters) {
     stdio_init_all();
     printf("=== Wi-Fi + NTP Background Task ===\n");
@@ -128,22 +187,45 @@ static void wifi_ntp_task(void *pvParameters) {
     }
 }
 
-// UART + Activation Driver Task
+// UART + Activation Driver Task (Modified to include USB dump polling)
 static void uart_activation_task(void *pvParameters) {
     char recv_buf[128];
     comm_state_t state = STATE_HANDSHAKE;
 
     activation_driver_init(UART_PORT_NUM, UART_TX_PIN, UART_RX_PIN, UART_BAUDRATE);
+    
+    // Initialize both buttons
     gpio_init(BTN_PIN);
     gpio_set_dir(BTN_PIN, GPIO_IN);
     gpio_pull_up(BTN_PIN);
+    
+    gpio_init(DUMP_BTN_PIN);
+    gpio_set_dir(DUMP_BTN_PIN, GPIO_IN);
+    gpio_pull_up(DUMP_BTN_PIN);
 
     printf("=== Master Pico (UART + NTP integrated) ===\n");
+    printf("GP%d: Request data from Slave. GP%d: Dump saved data via USB.\n", BTN_PIN, DUMP_BTN_PIN);
 
     while (1) {
+        
+        // --- NEW: Check for Dump Button Press (GP21) ---
+        if (!gpio_get(DUMP_BTN_PIN)) {
+            printf("[Master] Dump button (GP21) pressed → DUMPING SAVED DATA\n");
+            vTaskDelay(pdMS_TO_TICKS(100)); // Debounce
+            master_dump_saved_data();
+            // Wait for button release
+            while (!gpio_get(DUMP_BTN_PIN)) {
+                vTaskDelay(pdMS_TO_TICKS(50)); 
+            }
+            vTaskDelay(pdMS_TO_TICKS(100)); // Post-release debounce
+            continue; // Skip the rest of the state machine this cycle
+        }
+        // --- END: Dump Button Check ---
+
         switch (state) {
             // --- HANDSHAKE PHASE ---
             case STATE_HANDSHAKE:
+                // ... (existing logic) ...
                 activation_send("HELLO\n");
                 if (activation_receive_line(recv_buf, sizeof(recv_buf))) {
                     if (strncmp(recv_buf, "HI", 2) == 0) {
@@ -157,7 +239,7 @@ static void uart_activation_task(void *pvParameters) {
             // --- IDLE PHASE ---
             case STATE_IDLE:
                 if (!gpio_get(BTN_PIN)) {
-                    printf("[Master] Button pressed → Requesting data\n");
+                    printf("[Master] Button (GP20) pressed → Requesting data\n");
                     activation_send("GET_DATA\n");
                     received_data_length = 0; // Reset bufffer tracking
                     vTaskDelay(pdMS_TO_TICKS(300));
@@ -341,6 +423,10 @@ static void uart_activation_task(void *pvParameters) {
 
 int main() {
     stdio_init_all();
+    // Initialize USB early so it is ready for the dump function
+    // Assuming usb_init() is available via one of the included headers or libraries.
+    // usb_init(); // <-- If you have an explicit usb_init call, place it here.
+    
     ntp_mutex = xSemaphoreCreateMutex();
 
     // Start background Wi-Fi/NTP sync and UART protocol task
@@ -350,4 +436,3 @@ int main() {
     vTaskStartScheduler();
     while (1) tight_loop_contents();
 }
-

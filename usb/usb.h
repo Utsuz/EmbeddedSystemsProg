@@ -15,6 +15,6 @@ void usb_send(const char *message);
 void usb_send_raw(const uint8_t *data, size_t length);
 
 // Check if usb is connected
-bool usb_is_connecteed(void);
+bool usb_is_connected(void);
 
 #endif
