@@ -1,2 +1,206 @@
-# EmbeddedSystemsProg
-Include FreeRTOS-Kernel folder in the root directory
+---
+title: Adaptive Temperature Datalogger (Master–Slave Pico System)
+description: Dual-Pico BMP388 temperature logging system with compact flash storage, UART transfer, and USB export.
+---
+
+# Adaptive Temperature Datalogger (Master–Slave Pico System)
+
+A dual-microcontroller temperature datalogger built using two **Raspberry Pi Picos** (or Pico W):
+
+- The **Slave Pico**:
+  - Reads temperature from a **BMP388** sensor via I²C  
+  - Detects **excursions** (out-of-range temperatures)  
+  - Logs samples in flash  
+  - Encodes them into a **compact bit-encoded binary stream**  
+  - Sends the compact data to the Master via **UART**
+
+- The **Master Pico**:
+  - (On Pico W) connects to Wi-Fi and synchronizes time via **NTP**
+  - Communicates with the Slave over **UART**
+  - Stores received compact logs into its own **flash region**
+  - Exports the stored compact data over **USB** for PC-side decoding
+
+---
+
+## 📚 Table of Contents
+
+- [Project Overview](#project-overview)  
+- [Folder & File Structure](#folder--file-structure)  
+  - [bmp388/](#1-bmp388)  
+  - [slave_pico/](#2-slave_pico)  
+  - [master_pico/](#3-master_pico)  
+  - [uart_driver/](#4-uart_driver)  
+  - [activation_driver/](#5-activation_driver)  
+  - [usb/](#6-usb)  
+  - [ntp_driver/](#7-ntp_driver)  
+  - [HMAC_SHA256/](#8-hmac_sha256)  
+  - [main/](#9-main)  
+  - [decode.py](#10-decodepy)  
+- [Build & Compilation](#build--compilation)  
+- [Flashing the Picos](#flashing-the-picos)  
+- [Running the System](#running-the-system)  
+- [Testing Guide](#testing-guide)  
+
+---
+
+## Project Overview
+
+This project is designed as an **embedded systems coursework-level** temperature datalogger demonstrating:
+
+- Sensor interfacing with **BMP388**
+- Flash-based data logging
+- **Compact binary encoding** of temperature data for storage efficiency
+- **Master–Slave communication** over UART
+- **Wi-Fi + NTP** time synchronization (on Master Pico W)
+- USB export and PC-side decoding of logs into CSV
+
+It is structured to be readable and extensible for embedded systems students and engineers.
+
+---
+
+## Folder & File Structure
+
+Below is a GitHub Pages–friendly breakdown of the key folders and files.
+
+---
+
+### 1. `bmp388/`
+
+Core sensor and storage logic for the BMP388 and log encoding.
+
+| File | Description |
+|------|-------------|
+| `sensor_driver.c` | Low-level BMP388 I²C routines, sensor initialization, calibration, and **excursion detection** logic. |
+| `storage_driver.c` | Implements flash-backed **ACTIVE log** (timestamp + temperature), RAM mirror, **compact bitstream encoder**, and saving of a compact blob into a dedicated flash region. |
+| `bmp388_driver.h` | Public header exposing the BMP388 and storage APIs to both `slave_pico` and `master_pico`. |
+| `flash_helpers.c` / `flash_helpers.h` | Safe wrappers around `flash_range_program` / sector erase with interrupt protection. |
+
+---
+
+### 2. `slave_pico/`
+
+Implements the **temperature logger node**.
+
+| File | Description |
+|------|-------------|
+| `slave_pico.c` | Configures I²C, initializes the BMP388, periodically samples temperature, logs to flash, triggers compact backup, and sends the compact blob to the Master via UART. Also handles button input and excursion-based sample period switching. |
+
+**Key behaviors:**
+
+- Baseline sampling (e.g., every 5 seconds)  
+- Faster sampling during excursion (e.g., 200 ms)  
+- Buttons to:
+  - Start/stop sampling  
+  - Request time from Master  
+  - Trigger compact backup and transfer  
+
+---
+
+### 3. `master_pico/`
+
+Implements the **coordinator node**.
+
+| File | Description |
+|------|-------------|
+| `master_pico.c` | Runs on Pico W, manages Wi-Fi + NTP time sync, does UART handshake with Slave, requests data (`GET_DATA`), receives compact blobs, stores them into its own flash region, and dumps data to PC over USB. |
+
+**Key behaviors:**
+
+- Sends `"HELLO"` / `"GET_DATA"` / `"GET_TIME"` messages to Slave  
+- Receives `"HI"`, `"LENGTH <N>"`, `ACK_EMPTY`, `DONE` responses  
+- Saves received binary to flash with a header and length  
+- Dumps stored binary to USB when commanded  
+
+---
+
+### 4. `uart_driver/`
+
+UART abstraction layer.
+
+| File | Description |
+|------|-------------|
+| `uart_driver.c` | Provides initialization, transmit, receive, and availability checking for RP2040 UART instances. Used by both Master and Slave. |
+| `uart_driver.h` | Header for UART driver functions. |
+| `uart_driver_test.c` | Simple UART test app for validating wiring and basic TX/RX behavior. |
+
+---
+
+### 5. `activation_driver/`
+
+Line-based **command protocol** on top of UART.
+
+| File | Description |
+|------|-------------|
+| `activation_driver.c` | Implements functions to send ASCII commands and receive lines terminated by `\n`. Used to exchange high-level text commands (e.g., `"HELLO"`, `"HI"`, `"GET_DATA"`, `"TIME 123456789"`). |
+| `activation_driver.h` | Header for the activation driver APIs. |
+
+---
+
+### 6. `usb/`
+
+USB CDC communication.
+
+| File | Description |
+|------|-------------|
+| `usb.c` | Initializes USB stdio, provides `usb_send()` for text and `usb_send_raw()` for binary data, and exposes `usb_is_connected()` to check host connection. May include a standalone test `main()` under a compile-time flag. |
+| `usb.h` | Header for USB helper functions. |
+
+---
+
+### 7. `ntp_driver/`
+
+Wi-Fi and NTP for Master Pico W.
+
+| File | Description |
+|------|-------------|
+| `ntp_driver.c` | Connects to Wi-Fi (SSID/password configured elsewhere), sends NTP request, and returns synchronized time as `time_t`. Includes FreeRTOS task entry for periodic NTP refresh. |
+| `ntp_driver.h` | Header for NTP APIs. |
+
+---
+
+### 8. `HMAC_SHA256/`
+
+Cryptographic utilities.
+
+| File | Description |
+|------|-------------|
+| `hmac_sha256.c` | Implements HMAC-SHA256 using mbedTLS’s SHA-256 routines. Used currently as a demonstrative function in the main test code. |
+| `hmac_sha256.h` | Header for HMAC APIs. |
+
+---
+
+### 9. `main/`
+
+Standalone demonstration (not the master or slave application).
+
+| File | Description |
+|------|-------------|
+| `main.c` | Example FreeRTOS-based application that demonstrates HMAC computation and NTP usage. It is not the main entrypoint for `master_pico` or `slave_pico`, but useful for reference and testing. |
+
+---
+
+### 10. `decode.py`
+
+Python utility for PC-side decoding.
+
+| File | Description |
+|------|-------------|
+| `decode.py` | Reads a compact binary log (exported from the Master) and converts it into CSV, reconstructing timestamps, bucketized temperatures, and excursion flags. Intended to be run on your PC after you capture the compact dump. |
+
+---
+
+## Build & Compilation
+
+These instructions assume:
+
+- You have set up the **Pico SDK** and **ARM GCC toolchain**.  
+- You are using a typical CMake workflow on Linux, macOS, or Windows.
+
+> 📌 **Tip for GitHub Pages readers**: You can document your exact Pico SDK install steps in a separate `docs/` page and link to it from here.
+
+### 1. Configure the Pico SDK Environment
+
+Make sure `PICO_SDK_PATH` is correctly set; for example:
+
+```bash
+export PICO_SDK_PATH=/path/to/pico-sdk
