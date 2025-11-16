@@ -232,59 +232,59 @@ make
 ```
 
 After a successful build, you should see UF2 or ELF outputs for:
--`slave_pico`
--`master_pico`
--and any test/demo targets (bmp388, UART tests, etc.)
+- `slave_pico`
+- `master_pico`
+- and any test/demo targets (bmp388, UART tests, etc.)
 
 ### Flashing the Picos
--You will need two Picos (or Pico Ws) — one for the Slave and one for the Master.
+- You will need two Picos (or Pico Ws) — one for the Slave and one for the Master.
 
 ### Flashing the Slave Pico
--Hold down the BOOTSEL button on the Slave Pico.
--Connect it to your computer via USB.
--A RPI-RP2 drive will appear.
--Copy or drag slave_pico.uf2 (from build/) onto the RPI-RP2 drive.
--The Pico will reboot with the Slave firmware.
+- Hold down the BOOTSEL button on the Slave Pico.
+- Connect it to your computer via USB.
+- A RPI-RP2 drive will appear.
+- Copy or drag slave_pico.uf2 (from build/) onto the RPI-RP2 drive.
+- The Pico will reboot with the Slave firmware.
 
 ### Flashing the Master Pico
 Repeat the same steps with the second board:
--Hold BOOTSEL.
--Plug in via USB.
--Copy master_pico.uf2 to RPI-RP2.
--Board reboots running Master firmware.
+- Hold BOOTSEL.
+- Plug in via USB.
+- Copy master_pico.uf2 to RPI-RP2.
+- Board reboots running Master firmware.
 
 ### Running the System
 ### Physical Connections
 
--Slave Pico:
-  -BMP388 sensor wired to I²C pins (e.g., GP4 = SDA, GP5 = SCL).
--Master ↔ Slave UART:
-  -Master TX → Slave RX
-  -Master RX → Slave TX
-  -Common GND between boards
-  -Default config: UART1, TX on GP8, RX on GP9 for both boards.
+- Slave Pico:
+  - BMP388 sensor wired to I²C pins (e.g., GP4 = SDA, GP5 = SCL).
+- Master ↔ Slave UART:
+  - Master TX → Slave RX
+  - Master RX → Slave TX
+  - Common GND between boards
+  - Default config: UART1, TX on GP8, RX on GP9 for both boards.
 
 `ℹ️ You can document your exact pinout wiring in a dedicated section or diagram for students.`
 
 ### Typical Workflow
 
--Power both Picos (either via USB or external supply).
+- Power both Picos (either via USB or external supply).
 Master (Pico W):
-  -Connects to your Wi-Fi (check the code for WIFI_SSID / WIFI_PASSWORD configuration).
-  -Performs NTP sync.
-  -Starts sending "HELLO" over UART until it receives "HI" from Slave.
+  - Connects to your Wi-Fi (check the code for WIFI_SSID / WIFI_PASSWORD configuration).
+  - Performs NTP sync.
+  - Starts sending "HELLO" over UART until it receives "HI" from Slave.
 Slave:
-  -On receiving "HELLO":
-  -Replies with "HI", completing the handshake.
-  -Waits for button presses and/or commands.
+  - On receiving "HELLO":
+  - Replies with "HI", completing the handshake.
+  - Waits for button presses and/or commands.
 
 ### Button Behaviors (Typical Mapping)
 `The actual GPIO mappings are in slave_pico.c and master_pico.c, but a common configuration is:`
 On Slave Pico:
--GP22 – Start/stop sampling (toggle sensor on/off).
--GP20 – Request time from Master (Slave asks "GET_TIME", then waits for TIME <epoch>).
--GP21 – Trigger compact backup and send data to Master.
+- GP22 – Start/stop sampling (toggle sensor on/off).
+- GP20 – Request time from Master (Slave asks "GET_TIME", then waits for TIME <epoch>).
+- GP21 – Trigger compact backup and send data to Master.
 
 On Master Pico:
--GP20 – Request compact data from Slave (GET_DATA).
--GP21 – Dump stored compact data to USB (for capture on PC).
+- GP20 – Request compact data from Slave (GET_DATA).
+- GP21 – Dump stored compact data to USB (for capture on PC).
