@@ -269,22 +269,21 @@ Repeat the same steps with the second board:
 ### Typical Workflow
 
 - Power both Picos (either via USB or external supply).
-Master (Pico W):
+###Master (Pico W):
   - Connects to your Wi-Fi (check the code for WIFI_SSID / WIFI_PASSWORD configuration).
   - Performs NTP sync.
   - Starts sending "HELLO" over UART until it receives "HI" from Slave.
-Slave:
+###Slave:
   - On receiving "HELLO":
   - Replies with "HI", completing the handshake.
   - Waits for button presses and/or commands.
 
 ### Button Behaviors (Typical Mapping)
 `The actual GPIO mappings are in slave_pico.c and master_pico.c, but a common configuration is:`
-On Slave Pico:
+### On Slave Pico:
 - GP22 – Start/stop sampling (toggle sensor on/off).
 - GP20 – Request time from Master (Slave asks "GET_TIME", then waits for TIME <epoch>).
 - GP21 – Trigger compact backup and send data to Master.
-
-On Master Pico:
+### On Master Pico:
 - GP20 – Request compact data from Slave (GET_DATA).
 - GP21 – Dump stored compact data to USB (for capture on PC).
