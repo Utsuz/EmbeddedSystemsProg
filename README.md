@@ -210,7 +210,7 @@ On Windows + PowerShell, you might use:
 $env:PICO_SDK_PATH="C:\path\to\pico-sdk"
 ```
 
-###2. Configure the Build Directory
+### 2. Configure the Build Directory
 
 From the project root (EmbeddedSystemsProg-main/):
 ```bash
@@ -221,7 +221,7 @@ cmake ..
 
 This will generate build files for all components, including slave_pico and master_pico.
 
-###3. Compile
+### 3. Compile
 ```bash
 cmake --build .
 ```
@@ -236,25 +236,25 @@ After a successful build, you should see UF2 or ELF outputs for:
 -`master_pico`
 -and any test/demo targets (bmp388, UART tests, etc.)
 
-###Flashing the Picos
+### Flashing the Picos
 -You will need two Picos (or Pico Ws) — one for the Slave and one for the Master.
 
-###Flashing the Slave Pico
+### Flashing the Slave Pico
 -Hold down the BOOTSEL button on the Slave Pico.
 -Connect it to your computer via USB.
 -A RPI-RP2 drive will appear.
 -Copy or drag slave_pico.uf2 (from build/) onto the RPI-RP2 drive.
 -The Pico will reboot with the Slave firmware.
 
-###Flashing the Master Pico
+### Flashing the Master Pico
 Repeat the same steps with the second board:
 -Hold BOOTSEL.
 -Plug in via USB.
 -Copy master_pico.uf2 to RPI-RP2.
 -Board reboots running Master firmware.
 
-###Running the System
-###Physical Connections
+### Running the System
+### Physical Connections
 
 -Slave Pico:
   -BMP388 sensor wired to I²C pins (e.g., GP4 = SDA, GP5 = SCL).
@@ -266,7 +266,7 @@ Repeat the same steps with the second board:
 
 `ℹ️ You can document your exact pinout wiring in a dedicated section or diagram for students.`
 
-###Typical Workflow
+### Typical Workflow
 
 -Power both Picos (either via USB or external supply).
 Master (Pico W):
@@ -278,7 +278,7 @@ Slave:
   -Replies with "HI", completing the handshake.
   -Waits for button presses and/or commands.
 
-###Button Behaviors (Typical Mapping)
+### Button Behaviors (Typical Mapping)
 `The actual GPIO mappings are in slave_pico.c and master_pico.c, but a common configuration is:`
 On Slave Pico:
 -GP22 – Start/stop sampling (toggle sensor on/off).
