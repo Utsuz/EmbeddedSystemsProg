@@ -7,6 +7,8 @@ target_link_libraries(slave_pico
     uart_driver
     activation_driver
     bmp388_core
+    pico_cyw43_arch_none
+    hmac_sha256
 )
 
 target_include_directories(slave_pico PRIVATE

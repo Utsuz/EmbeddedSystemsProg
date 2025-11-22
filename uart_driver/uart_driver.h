@@ -19,3 +19,6 @@ uint8_t uart_driver_read_byte(void);
 
 // Read into buffer (blocking until len received)
 size_t uart_driver_read(uint8_t *buf, size_t len);
+
+// Allowing uart to wait for all bytes to be read
+size_t uart_driver_read_timed(uint8_t *buf, size_t len, uint32_t timeout_ms);

@@ -12,6 +12,7 @@ typedef struct {
 /* Sensor API */
 int bmp388_init(int i2c_port, uint32_t sda_pin, uint32_t scl_pin, uint8_t i2c_addr);
 int bmp388_read(bmp388_sample_t *out);
+float bmp388_last_temp(void);
 
 /* Control Functions */
 void bmp388_sensorStart(void);

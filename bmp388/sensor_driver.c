@@ -39,6 +39,7 @@ static uint32_t g_stable_needed = 1;
 static bool     g_in_excursion  = false;
 static bool     g_sensor_active = false;
 static uint32_t g_stable_count  = 0;
+static float g_last_temp_c = 0.0f; // Store last recorded temp
 
 /* Temperature calibration */
 typedef struct {
@@ -172,6 +173,7 @@ int bmp388_read(bmp388_sample_t *out) {
     if (t_raw == 0) return -5;
 
     out->temperature_c = compensate_temperature(t_raw);
+    g_last_temp_c = out->temperature_c;
 
     /* Update excursion state on every reading */
     bool changed = excursion_update_from_temp(out->temperature_c);
@@ -186,6 +188,11 @@ int bmp388_read(bmp388_sample_t *out) {
     }
 
     return 0;
+}
+
+// Return last read temperature
+float bmp388_last_temp(void) {
+    return g_last_temp_c;
 }
 
 /* ===== Optional public helpers (add prototypes to bmp388_driver.h if needed) =====

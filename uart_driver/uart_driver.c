@@ -34,3 +34,22 @@ size_t uart_driver_read(uint8_t *buf, size_t len) {
     }
     return len;
 }
+
+size_t uart_driver_read_timed(uint8_t *buf, size_t len, uint32_t timeout_ms) {
+    if (!uart_inst) return 0;
+    
+    size_t received_count = 0;
+    absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+    
+    while (received_count < len && absolute_time_diff_us(get_absolute_time(), deadline) > 0) {
+        if (uart_is_readable(uart_inst)) {
+            buf[received_count++] = uart_getc(uart_inst);
+            // Reset timeout on activity to handle long, valid transfers
+            deadline = delayed_by_ms(get_absolute_time(), timeout_ms); 
+        } else {
+            // Use a brief sleep to allow FreeRTOS scheduling
+            sleep_us(100); 
+        }
+    }
+    return received_count;
+}
