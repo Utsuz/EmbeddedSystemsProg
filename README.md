@@ -578,11 +578,11 @@ ninja slave_pico
   - Connect Master Pico to PC via USB.
   - Open a terminal to check logs if needed.
   - Press GP21 on Master:
-  - Master:
-  - Looks up activation time (from header or last dump).
-  - Prints TIME YYYY-MM-DD HH:MM:SS.
-  - Flushes.
-  - Sends raw compact blob via USB.
+    - Master:
+      - Looks up activation time (from header or last dump).
+      - Prints TIME YYYY-MM-DD HH:MM:SS.
+      - Flushes.
+      - Sends raw compact blob via USB.
   - On PC, run:
     ```
       pip install pyserial
@@ -590,100 +590,60 @@ ninja slave_pico
     ```
   -  Ensure PORT in decode.py matches your Master Pico COM port.
   -  Script will:
-  -  Wait for TIME line.
-  -  Capture following binary blob.'
-  -  Decode to decoded.csv with:
-  -  datetime
-  -  temp_C
-  -  excursion (0 or 1).
+    -  Wait for TIME line.
+    -  Capture following binary blob.'
+    -  Decode to decoded.csv with:
+      -  datetime
+      -  temp_C
+      -  excursion (0 or 1).
 
-  ## 14. How to Test
-  ### 14.1. Unit / Module Tests
+## 14. How to Test
+### 14.1. Unit / Module Tests
+  - UART Driver Test
+    - Build uart_driver_test.
+    - Flash to a Pico, connect UART loopback or second Pico.
+    - Press GP20:
+      - Expect “Hello N from Pico!” on the receiving side.
+      - Any incoming UART data should echo to USB console.
+  - USB Test
+    - Build usb_test (if enabled).
+    - Flash to a Pico.
+    - Connect via USB serial:
+      - Expect “USB Serial Ready!” and sample lines.
+      - Confirm the host sees both text and optional raw binary bursts.
+  - NTP Driver Test
+    - Enable BUILD_NTP_TEST in ntp_driver/CMakeLists.txt and build.
+    - Flash ntp_driver_test to Pico W.
+    - Monitor USB serial:
+      - Should connect to Wi-Fi and print NTP time: ....
+  - HMAC Test
+    - Enable HMAC_TEST in HMAC_SHA256/CMakeLists.txt.
+    - Flash hmac_test and check printed HMAC against expected value (for given key/message).
+  - BMP388 Standalone Logger
+    - Flash bmp388 to a board with BMP388 wired.
+    - Observe temperature logs, sensor toggling via GP22, and compact dumps via serial commands.
 
-UART Driver Test
+### 14.2. End-to-End System Test
+  - Configure Wi-Fi (secrets.cmake), rebuild, and flash.
+  - Start both Master and Slave Picos.
+  - On Slave, request time (GP20) and confirm:
+    - Slave prints human-readable time.
+    - Sensor starts logging.
+  - Allow system to run and trigger excursions (e.g., warm/cool the sensor).
+  - On Master, press GP20 to request data.
+  - On Master, press GP21 to dump to PC.
+  - Run **decode.py** and inspect **decoded.csv**:
+    - Timestamps must be in correct order.
+    - Temperatures should be plausible.
+    - Excursion flag should reflect your temperature manipulations.
 
-Build uart_driver_test.
+## 15. Summary
 
-Flash to a Pico, connect UART loopback or second Pico.
+### This project combines:
 
-Press GP20:
-
-Expect “Hello N from Pico!” on the receiving side.
-
-Any incoming UART data should echo to USB console.
-
-USB Test
-
-Build usb_test (if enabled).
-
-Flash to a Pico.
-
-Connect via USB serial:
-
-Expect “USB Serial Ready!” and sample lines.
-
-Confirm the host sees both text and optional raw binary bursts.
-
-NTP Driver Test
-
-Enable BUILD_NTP_TEST in ntp_driver/CMakeLists.txt and build.
-
-Flash ntp_driver_test to Pico W.
-
-Monitor USB serial:
-
-Should connect to Wi-Fi and print NTP time: ....
-
-HMAC Test
-
-Enable HMAC_TEST in HMAC_SHA256/CMakeLists.txt.
-
-Flash hmac_test and check printed HMAC against expected value (for given key/message).
-
-BMP388 Standalone Logger
-
-Flash bmp388 to a board with BMP388 wired.
-
-Observe temperature logs, sensor toggling via GP22, and compact dumps via serial commands.
-
-14.2. End-to-End System Test
-
-Configure Wi-Fi (secrets.cmake), rebuild, and flash.
-
-Start both Master and Slave Picos.
-
-On Slave, request time (GP20) and confirm:
-
-Slave prints human-readable time.
-
-Sensor starts logging.
-
-Allow system to run and trigger excursions (e.g., warm/cool the sensor).
-
-On Master, press GP20 to request data.
-
-On Master, press GP21 to dump to PC.
-
-Run decode.py and inspect decoded.csv:
-
-Timestamps must be in correct order.
-
-Temperatures should be plausible.
-
-Excursion flag should reflect your temperature manipulations.
-
-15. Summary
-
-This project combines:
-
-Embedded C on dual Pico W boards (Master + Slave).
-
-BMP388 sensor driver with adaptive sampling.
-
-Custom compact-bit encoding that greatly compresses temperature + excursion data.
-
-FreeRTOS + LWIP + NTP for accurate timekeeping.
-
-HMAC-SHA256 integrity checking.
-
-USB + Python tooling for exporting clean CSV logs
+  - Embedded C on dual Pico W boards (Master + Slave).
+  - BMP388 sensor driver with adaptive sampling.
+  - Custom compact-bit encoding that greatly compresses temperature + excursion data.
+  - FreeRTOS + LWIP + NTP for accurate timekeeping.
+  - HMAC-SHA256 integrity checking.
+  - USB + Python tooling for exporting clean CSV logs
