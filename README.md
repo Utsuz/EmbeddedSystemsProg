@@ -505,45 +505,51 @@ The main project uses the single-core config in the Master’s folder with 128 K
 
 ### 11.1. Prerequisites
 
-- **Raspberry Pi Pico SDK** installed.
-- **CMake ≥ 3.12**, **Ninja** or `make`, and an ARM GCC toolchain.
-- **FreeRTOS-Kernel**
-  ```
-    git clone https://github.com/FreeRTOS/FreeRTOS.git
-  ```
-- `secrets.cmake` with your Wi-Fi credentials:
-  ```cmake
-  set(WIFI_SSID "YourSSID")
-  set(WIFI_PASSWORD "YourPassword") 
-  ```
- ### 11.2. Configure & Build
- - **From the repo root:
+* **Raspberry Pi Pico SDK** installed.
+* **CMake ≥ 3.12**, **GNU Make**, and an ARM GCC toolchain.
+* **FreeRTOS-Kernel:** You must download the FreeRTOS kernel source and place it in the project root directory.
+    ```bash
+    git clone [https://github.com/FreeRTOS/FreeRTOS.git](https://github.com/FreeRTOS/FreeRTOS.git)
+    # The resulting FreeRTOS folder must be at the same level as the root CMakeLists.txt
+    ```
+* **`secrets.cmake`** with your Wi-Fi credentials:
+    Before building, **edit the existing `secrets.cmake` file** in the project root to include your network details (used for the NTP driver):
+    ```cmake
+    set(WIFI_SSID "YourActualSSID")
+    set(WIFI_PASSWORD "YourActualPassword") 
+    ```
 
- ```
- mkdir build
- cd build
-  ```
- ```cmake .. \
-  -DPICO_SDK_PATH=/path/to/pico-sdk \
-  -DPICO_TOOLCHAIN_PATH=/path/to/arm-none-eabi \
-  -G "Ninja"
-```
-### This will build all targets, including:
-  - `bmp388`
-  - `master_pico`
-  - `slave_pico`
-  - `uart_driver_test`
-  - `usb_test` (if enabled)
-  - `ntp_driver_test` (if BUILD_NTP_TEST=ON)
-  - `hmac_test` (if HMAC_TEST=ON)
-  - 
-### You can also build specific targets, e.g.:
-```
-ninja master_pico
-ninja slave_pico
-```
+### 11.2. Configure & Build using CMake and Make
 
-### The `.uf2` files will appear in the appropriate build subdirectories (e.g. `master_pico/master_pico.uf2`).
+The standard build process uses **CMake** to generate the build files and **GNU Make** to compile the code.
+
+1.  **Configure:** From the project root, create and enter the build directory, then run `cmake`. You must specify the paths to the necessary SDK and toolchain.
+    ```bash
+    mkdir build
+    cd build
+    ```
+    ```bash
+    cmake .. \
+     -DPICO_SDK_PATH=/path/to/pico-sdk \
+     -DPICO_TOOLCHAIN_PATH=/path/to/arm-none-eabi
+    ```
+
+2.  **Build:** You can now build the executables.
+
+     **To build all targets** (including `master_pico`, `slave_pico`, and all driver tests):
+        ```bash
+        make
+        ```
+
+    **To build specific targets**, such as the main application executables:
+        ```bash
+        make master_pico
+        make slave_pico
+        ```
+
+### This will generate the `.uf2` files for your targets in the `build` directory.
+
+---
 
 ## 12. How to Run
 ### 12.1. Hardware Setup
@@ -580,6 +586,8 @@ ninja slave_pico
     - `usb_test.uf2` – USB serial test.
     - `ntp_driver_test.uf2` – NTP/Wi-Fi sanity test.
     - `hmac_test.uf2` – HMAC correctness test.
+
+---
 
 ## 13. System Operation
 ### 13.1. Time Synchronisation
@@ -647,6 +655,8 @@ ninja slave_pico
       -  `temp_C`
       -  `excursion` (0 or 1).
 
+---
+
 ## 14. How to Test
 ### 14.1. Unit / Module Tests
   - UART Driver Test
@@ -686,6 +696,8 @@ ninja slave_pico
     - Timestamps must be in correct order.
     - Temperatures should be plausible.
     - Excursion flag should reflect your temperature manipulations.
+
+---
 
 ## 15. Summary
 
