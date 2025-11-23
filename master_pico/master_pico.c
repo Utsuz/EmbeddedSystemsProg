@@ -136,7 +136,6 @@ static void master_dump_saved_data(void) {
     }
 
     const master_dump_hdr_t *h = xip_hdr_master_dump();
-
     if (h->magic != MASTER_DUMP_MAGIC) {
         printf("[Master] No valid data blob found in flash (Magic: 0x%X).\n", (unsigned)h->magic);
         usb_send("[DUMP] No valid data found in flash.\n");
@@ -144,42 +143,62 @@ static void master_dump_saved_data(void) {
     }
 
     const uint32_t length = h->length;
-    const uint64_t unix_time_val = last_dump_unix_time;
-
     if (length == 0 || length > MAX_COMPACT_DUMP_SIZE) {
         printf("[Master] Invalid data length: %u bytes.\n", (unsigned)length);
         usb_send("[DUMP] Invalid data length recorded.\n");
         return;
     }
-    printf("[Master] DUMP START: Dumping %u bytes of compact data over USB...\n", (unsigned)length);
-    
-    // Flush the buffer to push the ASCII log BEFORE the binary stream.
-    stdio_flush(); 
-    sleep_ms(100); // Increased delay to ensure the OS processes the ASCII buffer
 
-    // START NEW BINARY HEADER LOGIC
-    uint8_t header_buf[BINARY_DUMP_HEADER_SIZE];
-    header_buf[0] = CMD_DUMP_HDR;
-    header_buf[1] = (uint8_t)(length & 0xFF);    // LSB
-    header_buf[2] = (uint8_t)(length >> 8);     // MSB
-    header_buf[3] = DONE_CHAR;                  // Use DONE_CHAR as a known header-end byte
-    
-    usb_send_raw(header_buf, BINARY_DUMP_HEADER_SIZE);
+    // Pointer to compact data stored in flash
+    const uint8_t *data_ptr = xip_data_master_dump();
 
-    if (unix_time_val > 0) {
-      uint8_t time_block[BINARY_TIME_SIZE];
-      time_block[0] = CMD_DUMP_TIME;
-      
-      memcpy(&time_block[1], &unix_time_val, sizeof(uint64_t));
-      usb_send_raw(time_block, BINARY_TIME_SIZE);
+    printf("[Master] DUMP START: Dumping %u bytes of compact data over USB...\n",
+           (unsigned)length);
+
+    // 1) Send a TIME line for the Python script
+    time_t base_time = 0;
+
+    if (last_dump_unix_time != 0) {
+        // Use the time that came from the slave (stored when data was received)
+        base_time = (time_t)last_dump_unix_time;
+    } else if (last_ntp_time != 0) {
+        // Fallback: compute current NTP-based time
+        uint64_t delta_ms =
+            to_ms_since_boot(get_absolute_time()) - to_ms_since_boot(last_sync_time);
+        base_time = last_ntp_time + (delta_ms / 1000);
     }
 
-    const uint8_t *data_ptr = xip_data_master_dump();
+    if (base_time != 0) {
+        struct tm *tm = gmtime(&base_time);
+        char timebuf[64];
+        snprintf(timebuf, sizeof(timebuf),
+                 "TIME %04d-%02d-%02d %02d:%02d:%02d\n",
+                 tm->tm_year + 1900,
+                 tm->tm_mon + 1,
+                 tm->tm_mday,
+                 tm->tm_hour,
+                 tm->tm_min,
+                 tm->tm_sec);
+        usb_send(timebuf);
+    } else {
+        // If we really have no time, still send an empty TIME for the script
+        usb_send("TIME 1970-01-01 00:00:00\n");
+    }
+
+    // Make sure the TIME line is pushed out before the binary
+    stdio_flush();
+    sleep_ms(50);
+
+    // 2) Send ONLY the raw compact blob (no custom headers)
     usb_send_raw(data_ptr, length);
-    
-    usb_send("\n[DUMP] DUMP END: Transfer complete.\n\n");
+
+    // 3) Optional: end marker for humans (ignored by Python since it's after the binary)
+    usb_send("\n[DUMP_END]\n");
+
     printf("[Master] Dump successful.\n");
 }
+
+
 
 void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     if (length == 0 || length > MAX_COMPACT_DUMP_SIZE) {
