@@ -19,7 +19,55 @@ Security is provided with **HMAC-SHA256** (via mbedTLS) over the compact data st
 
 ## 1. Repository Structure
 
-> Folder names assume the structure implied by your `CMakeLists.txt` files.
+### Project Structure Overview
+
+This project does not use a traditional folder layout such as `/src`, `/include`, `/lib`, `/test`, or `/docs`.  
+Instead, it uses a **driver-oriented modular structure**, which is intentional.
+
+### Why this structure?
+
+### 1. Hardware-modular organisation
+Each hardware or firmware subsystem has its own folder:
+
+- bmp388/
+- uart_driver/
+- usb/
+- ntp_driver/
+- activation_driver/
+- HMAC_SHA256/
+- master_pico/
+- slave_pico/
+
+Each folder contains:
+- its own C source files
+- its own header files
+- its own CMakeLists.txt
+- optional standalone test programs
+
+This matches how embedded systems are typically structured, where each driver is a self-contained module.
+
+### 2. Easier standalone testing and debugging
+Every driver can be compiled and tested independently:
+
+- `uart_driver_test` verifies UART wiring
+- `bmp388` standalone logger tests the sensor on its own
+- `ntp_driver_test` tests Wi-Fi + NTP without the rest of the system
+- `hmac_test` validates the cryptographic implementation
+
+This was necessary when debugging:
+- I2C communication
+- UART binary protocol
+- flash storage regions
+- compact-bit encoder
+- HMAC verification
+- FreeRTOS scheduling
+
+A single `/src` folder would make this harder and less organised.
+
+### 3. Pico SDK and FreeRTOS build requirements
+The Raspberry Pi Pico SDK + FreeRTOS Kernel expect a top-level CMake project that adds each module using:
+
+
 
 ### Top Level
 
