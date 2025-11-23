@@ -72,9 +72,6 @@ static int read_temp_calib(void) {
     g_tcal.par_t2 = (float)T2s / 16384.0f;
     g_tcal.par_t3 = (float)T3s / 281474976710656.0f;
     g_tcal.t_lin  = 0.0f;
-
-    printf("T1=%.3f  T2=%.9f  T3=%.12f\n",
-           g_tcal.par_t1, g_tcal.par_t2, g_tcal.par_t3);
     return 0;
 }
 
@@ -246,3 +243,4 @@ void bmp388_sensorStart(void) {
         printf("[BMP388] WARN: Failed to start sensor!\n");
     }
 }
+
