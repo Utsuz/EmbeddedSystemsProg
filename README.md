@@ -479,13 +479,13 @@ The main project uses the single-core config in the Master’s folder with 128 K
   -G "Ninja"
 ```
 ### This will build all targets, including:
-  - **bmp388**
-  - **master_pico**
-  - **slave_pico**
-  - **uart_driver_test**
-  - **usb_test** (if enabled)
-  - **ntp_driver_test** (if BUILD_NTP_TEST=ON)
-  - **hmac_test** (if HMAC_TEST=ON)
+  - `bmp388`
+  - `master_pico`
+  - `slave_pico`
+  - `uart_driver_test`
+  - `usb_test` (if enabled)
+  - `ntp_driver_test` (if BUILD_NTP_TEST=ON)
+  - `hmac_test` (if HMAC_TEST=ON)
   - 
 ### You can also build specific targets, e.g.:
 ```
@@ -493,43 +493,43 @@ ninja master_pico
 ninja slave_pico
 ```
 
-### The .uf2 files will appear in the appropriate build subdirectories (e.g. master_pico/master_pico.uf2).
+### The `.uf2` files will appear in the appropriate build subdirectories (e.g. `master_pico/master_pico.uf2`).
 
 ## 12. How to Run
 ### 12.1. Hardware Setup
   - Slave Pico:
     - Raspberry Pi Pico W (or Pico).
     - BMP388 sensor connected via I²C:
-      - EX_I2C_PORT=0, SDA=GP4, SCL=GP5, address 0x77.
+      - `EX_I2C_PORT=0`, `SDA=GP4`, `SCL=GP5`, address `0x77`.
     - UART1 to Master:
-      - TX=GP8, RX=GP9.
+      - `TX=GP8`, `RX=GP9`.
     - Buzzer:
-      - BUZZER_PIN=GP18.
+      - `BUZZER_PIN=GP18`.
     - Buttons:
-      - GP20 – Request time from Master.
-      - GP21 – Dump compact via USB / request dump.
-      - GP22 – Toggle sensor.
+      - `GP20` – Request time from Master.
+      - `GP21` – Dump compact via USB / request dump.
+      - `GP22` – Toggle sensor.
   - Master Pico:
     - Raspberry Pi Pico W.
     - UART1 to Slave (cross-over pins, common GND):
       - GP8 ↔ GP9 (TX↔RX).
     - Buttons:
-      - GP20 – Request data from Slave.
-      - GP21 – Dump saved compact data over USB to PC.
-      - GP22 – Wipe saved data region.
+      - `GP20` – Request data from Slave.
+      - `GP21` – Dump saved compact data over USB to PC.
+      - `GP22` – Wipe saved data region.
 
 ### 12.2. Flashing
 
   - Slave Pico
-    - Copy slave_pico.uf2 onto the Slave board (BOOTSEL method).
+    - Copy `slave_pico.uf2` onto the Slave board (BOOTSEL method).
   - Master Pico
-    - Copy master_pico.uf2 onto the Master board.
+    - Copy `master_pico.uf2` onto the Master board.
   - Optional Test Binaries
-    - bmp388.uf2 – stand-alone logging test.
-    - uart_driver_test.uf2 – UART wiring test.
-    - usb_test.uf2 – USB serial test.
-    - ntp_driver_test.uf2 – NTP/Wi-Fi sanity test.
-    - hmac_test.uf2 – HMAC correctness test.
+    - `bmp388.uf2` – stand-alone logging test.
+    - `uart_driver_test.uf2` – UART wiring test.
+    - `usb_test.uf2` – USB serial test.
+    - `ntp_driver_test.uf2` – NTP/Wi-Fi sanity test.
+    - `hmac_test.uf2` – HMAC correctness test.
 
 ## 13. System Operation
 ### 13.1. Time Synchronisation
@@ -538,35 +538,35 @@ ninja slave_pico
   - Master:
     - Wi-Fi + NTP task connects to Wi-Fi and starts syncing time.
   - On Slave:
-    - Press GP20 (“Request TIME”).
-    - Slave sends CMD_GET_TIME to Master.
+    - Press **GP20** (“Request TIME”).
+    - Slave sends `CMD_GET_TIME` to Master.
   - Master:
-    - Responds with CMD_TIME_RSP + 8-byte Unix time.
-    - Saves this as activation time (last_activation_unix_time).
+    - Responds with `CMD_TIME_RSP` + 8-byte Unix time.
+    - Saves this as activation time (`last_activation_unix_time`).
   - Slave:
     - Receives time, prints human readable time.
     - Starts sensor sampling with excursion-aware rates.
 
 ### 13.2. Logging & Excursion
   - Slave samples temperature periodically:
-    - Baseline period: SAMPLE_PERIOD_MS (e.g. 5000 ms).
-    - Excursion period: EXCURSION_PERIOD_MS (e.g. 200 ms) when temperature goes outside [t_low, t_high].
+    - Baseline period: `SAMPLE_PERIOD_MS` (e.g. 5000 ms).
+    - Excursion period: `EXCURSION_PERIOD_MS` (e.g. 200 ms) when temperature goes outside [t_low, t_high].
   - Excursion detection:
-    - If temperature < t_low or > t_high → excursion ON.
+    - If temperature < `t_low` or > `t_high` → excursion ON.
     - Returns to normal after several stable in-range samples.
 
 ### 13.3. Requesting Data (Master ← Slave)
 
   - On Master, press GP20:
-    - Master sends CMD_REQ_DATA to Slave.
+    - Master sends `CMD_REQ_DATA` to Slave.
   - On Slave:
     - Stops sensor.
-    - Saves compact blob to flash (bmp388_backup_compact_save()).
+    - Saves compact blob to flash (`bmp388_backup_compact_save()`).
   - Sends:
-    - Binary header (CMD_SEND_DATA_HDR + length).
+    - Binary header (`CMD_SEND_DATA_HDR` + length).
     - 8-byte activation Unix time.
     - Compact blob.
-    - DONE_CHAR.
+    - `DONE_CHAR`.
   - On Master:
     - Reads header & payload.
     - Extracts activation time.
@@ -580,7 +580,7 @@ ninja slave_pico
   - Press GP21 on Master:
     - Master:
       - Looks up activation time (from header or last dump).
-      - Prints TIME YYYY-MM-DD HH:MM:SS.
+      - Prints `TIME YYYY-MM-DD HH:MM:SS`.
       - Flushes.
       - Sends raw compact blob via USB.
   - On PC, run:
@@ -588,43 +588,43 @@ ninja slave_pico
       pip install pyserial
       python decode.py
     ```
-  -  Ensure PORT in decode.py matches your Master Pico COM port.
+  -  Ensure `PORT` in `decode.py` matches your Master Pico COM port.
   -  Script will:
-    -  Wait for TIME line.
+    -  Wait for `TIME` line.
     -  Capture following binary blob.'
     -  Decode to decoded.csv with:
-      -  datetime
-      -  temp_C
-      -  excursion (0 or 1).
+      -  `datetime`
+      -  `temp_C`
+      -  `excursion` (0 or 1).
 
 ## 14. How to Test
 ### 14.1. Unit / Module Tests
   - UART Driver Test
-    - Build uart_driver_test.
+    - Build `uart_driver_test`.
     - Flash to a Pico, connect UART loopback or second Pico.
     - Press GP20:
       - Expect “Hello N from Pico!” on the receiving side.
       - Any incoming UART data should echo to USB console.
   - USB Test
-    - Build usb_test (if enabled).
+    - Build `usb_test` (if enabled).
     - Flash to a Pico.
     - Connect via USB serial:
       - Expect “USB Serial Ready!” and sample lines.
       - Confirm the host sees both text and optional raw binary bursts.
   - NTP Driver Test
-    - Enable BUILD_NTP_TEST in ntp_driver/CMakeLists.txt and build.
+    - Enable `BUILD_NTP_TEST` in `ntp_driver/CMakeLists.txt` and build.
     - Flash ntp_driver_test to Pico W.
     - Monitor USB serial:
-      - Should connect to Wi-Fi and print NTP time: ....
+      - Should connect to Wi-Fi and print `NTP time: ....`
   - HMAC Test
-    - Enable HMAC_TEST in HMAC_SHA256/CMakeLists.txt.
-    - Flash hmac_test and check printed HMAC against expected value (for given key/message).
+    - Enable `HMAC_TEST` in `HMAC_SHA256/CMakeLists.txt`.
+    - Flash `hmac_test` and check printed HMAC against expected value (for given key/message).
   - BMP388 Standalone Logger
-    - Flash bmp388 to a board with BMP388 wired.
+    - Flash `bmp388` to a board with BMP388 wired.
     - Observe temperature logs, sensor toggling via GP22, and compact dumps via serial commands.
 
 ### 14.2. End-to-End System Test
-  - Configure Wi-Fi (secrets.cmake), rebuild, and flash.
+  - Configure Wi-Fi (`secrets.cmake`), rebuild, and flash.
   - Start both Master and Slave Picos.
   - On Slave, request time (GP20) and confirm:
     - Slave prints human-readable time.
@@ -632,7 +632,7 @@ ninja slave_pico
   - Allow system to run and trigger excursions (e.g., warm/cool the sensor).
   - On Master, press GP20 to request data.
   - On Master, press GP21 to dump to PC.
-  - Run **decode.py** and inspect **decoded.csv**:
+  - Run `decode.py` and inspect `decoded.csv`:
     - Timestamps must be in correct order.
     - Temperatures should be plausible.
     - Excursion flag should reflect your temperature manipulations.
