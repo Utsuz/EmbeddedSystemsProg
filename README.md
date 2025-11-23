@@ -459,8 +459,10 @@ The main project uses the single-core config in the Master’s folder with 128 K
 
 - **Raspberry Pi Pico SDK** installed.
 - **CMake ≥ 3.12**, **Ninja** or `make`, and an ARM GCC toolchain.
-- **FreeRTOS-Kernel** present at:
-  - `FreeRTOS-Kernel/` (as referenced in root `CMakeLists.txt`).
+- **FreeRTOS-Kernel**
+  ```
+    git clone https://github.com/FreeRTOS/FreeRTOS.git
+  ```
 - `secrets.cmake` with your Wi-Fi credentials:
   ```cmake
   set(WIFI_SSID "YourSSID")
