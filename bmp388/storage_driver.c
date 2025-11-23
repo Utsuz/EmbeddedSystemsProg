@@ -106,7 +106,7 @@ static inline void ramlog_add(uint32_t t_ms, float temp, bool exc_now) {
     }
     g_ram.t_ms[pos] = t_ms;
     g_ram.temp[pos] = temp;
-    g_ram.exc[pos]  = exc_now;   // <-- NEW
+    g_ram.exc[pos]  = exc_now;
 }
 
 static inline uint32_t ramlog_count(void) { return g_ram.count; }
@@ -114,7 +114,7 @@ static inline void ramlog_get(uint32_t i, uint32_t *t_ms, float *temp, bool *exc
     uint32_t pos = (g_ram.head + i) % RAMLOG_CAP;
     if (t_ms) *t_ms = g_ram.t_ms[pos];
     if (temp) *temp = g_ram.temp[pos];
-    if (exc)  *exc  = g_ram.exc[pos];   // <-- NEW
+    if (exc)  *exc  = g_ram.exc[pos];
 }
 
 /* ===== ACTIVE header/cache ===== */
@@ -182,8 +182,8 @@ int bmp388_storage_append(uint32_t time_ms, float temperature_c) {
     g.hdr.count  += 1;
     g.last_time_ms = g.last_time_ms + (uint32_t)rec.dtime_10ms * 10u;
 
-    bool exc_now = bmp388_excursion_state();     // <-- NEW (from sensor driver)
-    ramlog_add(time_ms, temperature_c, exc_now); // <-- pass it into RAM mirror
+    bool exc_now = bmp388_excursion_state();
+    ramlog_add(time_ms, temperature_c, exc_now);
 
     /* Flush when the buffer reaches a page boundary */
     if (g.page_fill >= FLASH_PAGE_SIZE) return flush_page_if_full();

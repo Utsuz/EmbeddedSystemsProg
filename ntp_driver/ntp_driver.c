@@ -105,7 +105,6 @@ time_t ntp_get_time(void) {
 // Standalone test main() to verify functionality
 // ----------------------------------------------------
 
-
 #ifdef BUILD_NTP_TEST
 #include "FreeRTOS.h"
 #include "task.h"

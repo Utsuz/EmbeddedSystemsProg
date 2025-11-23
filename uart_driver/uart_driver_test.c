@@ -16,7 +16,7 @@ int main(void) {
     printf("\n=== UART Driver Function Test ===\n");
     printf("Press GP20 to send message.\n");
 
-    // Initialize UART using your new driver
+    // Initialize UART using driver
     uart_driver_init(UART_PORT_NUM, UART_TX_PIN, UART_RX_PIN, UART_BAUDRATE);
 
     // Initialize button

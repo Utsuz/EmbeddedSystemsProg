@@ -158,7 +158,7 @@ static void master_dump_saved_data(void) {
     printf("[Master] DUMP START: Dumping %u bytes of compact data over USB...\n",
            (unsigned)length);
 
-    // 1) Send a TIME line for the Python script
+    // Send a TIME line for the Python script
     time_t base_time = 0;
 
     // NEW: try to read Unix time from header->reserved[0..7]
@@ -203,16 +203,14 @@ static void master_dump_saved_data(void) {
     stdio_flush();
     sleep_ms(50);
 
-    // 2) Send ONLY the raw compact blob (no custom headers)
+    // Send ONLY the raw compact blob (no custom headers)
     usb_send_raw(data_ptr, length);
 
-    // 3) Optional: end marker for humans (ignored by Python since it's after the binary)
+    // Eend marker
     usb_send("\n[DUMP_END]\n");
 
     printf("[Master] Dump successful.\n");
 }
-
-
 
 void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     if (length == 0 || length > MAX_COMPACT_DUMP_SIZE) {
@@ -227,7 +225,7 @@ void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     hdr.magic = MASTER_DUMP_MAGIC;
     hdr.length = length;
 
-    // NEW: persist the activation time (if known) into header->reserved[0..7]
+    // Persist the activation time (if known) into header->reserved[0..7]
     if (last_activation_unix_time != 0) {
         memcpy(hdr.reserved, &last_activation_unix_time, sizeof(uint64_t));
         printf("[Master] Stored activation time %llu into dump header.\n",
@@ -248,7 +246,6 @@ void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     }
     printf("[Master] SUCCESS: Saved %u bytes to flash offset 0x%X.\n", (unsigned)length, (unsigned)MASTER_DUMP_FLASH_OFFSET);
 }
-
 
 /* ========================================= */
 /* ===== 4. STATE HANDLERS (REFACTORED) ===== */
@@ -435,8 +432,6 @@ static void handle_receiving_state(comm_state_t *state_ptr) {
                 // 5. Save the Compact Data Blob (excluding time) to internal flash
                 master_save_compact_dump(compact_data_ptr, compact_data_length);
                 
-                // --- END NEW LOGIC ---
-                
             } else {
                 printf("[Master] WARNING: Received data but no proper DONE signal. Received: 0x%02X (Count: %zu). Aborting HMAC.\n", done_signal, done_read);
             }
@@ -528,7 +523,7 @@ static void uart_activation_task(void *pvParameters) {
 
     while (1) {
         
-        // REFACTORED: Handle Dump and Wipe buttons immediately
+        // Handle Dump and Wipe buttons immediately
         if (handle_user_buttons(&state)) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -563,7 +558,7 @@ static void uart_activation_task(void *pvParameters) {
                     state = STATE_RECEIVING;
                 }
                 
-                // REFACTORED: Handle incoming GET_TIME or other commands
+                // Handle incoming GET_TIME or other commands
                 handle_time_request();
                 
                 vTaskDelay(pdMS_TO_TICKS(50));
@@ -571,7 +566,7 @@ static void uart_activation_task(void *pvParameters) {
 
             // --- RECEIVING PHASE ---
             case STATE_RECEIVING:
-                // REFACTORED: Handled by dedicated function using binary protocol
+                // Handled by dedicated function using binary protocol
                 handle_receiving_state(&state);
                 break;
         }

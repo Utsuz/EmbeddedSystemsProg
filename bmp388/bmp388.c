@@ -1,3 +1,5 @@
+/* --- This is a debug test file for the BMP388 Driver --- */
+
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "pico/time.h"
@@ -12,10 +14,10 @@
 // === Buttons ===
 // GP20: BACKUP (copy ACTIVE -> BACKUP, clear ACTIVE)
 // GP21: DUMP BACKUP (print what's saved)
-// GP22: Binary dump (ACTIVE)
+// GP22 → start/stop sensor
 #define BTN_BACKUP 20
 #define BTN_SHOW   21
-#define BTN_TOGGLE 22   // GP22 → start/stop sensor
+#define BTN_TOGGLE 22
 
 #ifndef SAMPLE_PERIOD_MS
 #define SAMPLE_PERIOD_MS 5000
@@ -23,12 +25,6 @@
 #ifndef LOG_ERASE_ON_BOOT
 #define LOG_ERASE_ON_BOOT 0
 #endif
-
-// static void print_counts(void) {
-//     uint32_t a = bmp388_storage_count();
-//     uint32_t b = bmp388_backup_count();
-//     printf("# ACTIVE=%lu, BACKUP=%lu\n", (unsigned long)a, (unsigned long)b);
-// }
 
 int main(void) {
     stdio_init_all();
@@ -57,10 +53,6 @@ int main(void) {
     while (true) {
         /* --- serial commands (optional) --- */
         int c = getchar_timeout_us(0);
-        // if (c == 'D' || c == 'd') dump_active_compact();
-        // if (c == 'B' || c == 'b') dump_backup();
-        // if (c == 'R' || c == 'r') { bmp388_storage_rotate_to_backup(); printf("Rotated ACTIVE -> BACKUP.\n"); }
-        // if (c == 'X' || c == 'x') { bmp388_backup_clear(); printf("BACKUP cleared.\n"); }
         if (c == 'S' || c == 's') bmp388_backup_compact_save();
         if (c == 'B' || c == 'b') dump_backup_compact_raw();
         if (c == 'A' || c == 'a') dump_active_compact_bit();
@@ -76,23 +68,6 @@ int main(void) {
             }
             next = delayed_by_ms(next, SAMPLE_PERIOD_MS);
         }
-
-        // /* --- Button: GP20 → BACKUP now --- (active low) */
-        // bool now_backup = gpio_get(BTN_BACKUP);
-        // if (!now_backup && prev_backup) {
-        //     bmp388_storage_rotate_to_backup();
-        //     if (sensor_active) {
-        //         bmp388_sensorStop();
-        //         printf("[BTN22] Sensor stopped.\n");
-        //         sensor_active = false;
-        //     } else {
-        //         bmp388_sensorStart();
-        //         printf("[BTN22] Sensor started.\n");
-        //         sensor_active = true;
-        //     }
-        //     printf("[BTN] Rotated ACTIVE -> BACKUP.\n");
-        // }
-        // prev_backup = now_backup;
 
         /* --- Button: GP21 → SHOW BACKUP --- (active low) */
         bool now_show = gpio_get(BTN_SHOW);
