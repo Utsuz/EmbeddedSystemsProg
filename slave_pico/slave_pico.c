@@ -60,6 +60,7 @@ typedef enum { STATE_HANDSHAKE, STATE_IDLE, STATE_WAIT_TIME } comm_state_t;
 /* ========================================= */
 
 static absolute_time_t next_sample_time;
+static uint64_t initial_unix_time = 0; // The time received from Master
 static bool sensor_active = false;
 static bool prev_dump = true;
 static bool prev_toggle = true;
@@ -106,34 +107,51 @@ static uint32_t dump_compact_to_uart(void) {
     return 0;
   }
 
-  uint32_t length = h->length;
+  const uint32_t time_size = sizeof(uint64_t);
+  uint32_t compact_length = h->length;
+  
+  // CALCULATE NEW TOTAL LENGTH (8 bytes time + compact data)
+  const uint32_t total_payload_length = compact_length + time_size; 
+  
   uint8_t mac[HMAC_LEN];
 
   const uint8_t *data_ptr = xip_data_compact();
-  hmac_sha256((const uint8_t *)HMAC_KEY, strlen(HMAC_KEY), data_ptr, length,
-              mac);
+  // NOTE: HMAC is calculated only on the original compact data, NOT including the time.
+  hmac_sha256((const uint8_t *)HMAC_KEY, strlen(HMAC_KEY), data_ptr, compact_length, mac);
 
   print_hex(mac, HMAC_LEN, "[Slave] Calculated HMAC: ");
-  printf("[Slave] Data length: %u bytes.\n", (unsigned)length);
+  printf("[Slave] Data length: %u bytes (Compact: %u).\n", (unsigned)total_payload_length, (unsigned)compact_length);
 
   // 1. Send the fixed binary header: CMD (1B) + Length (2B)
   uart_putc_raw(uart_get_instance(UART_PORT_NUM), CMD_SEND_DATA_HDR); // 0x20
-  uart_putc_raw(uart_get_instance(UART_PORT_NUM), (uint8_t)(length & 0xFF)); // LSB
-  uart_putc_raw(uart_get_instance(UART_PORT_NUM), (uint8_t)(length >> 8));  // MSB
+  
+  // Send NEW Total Payload Length (Total Length = Compact Length + 8)
+  uart_putc_raw(uart_get_instance(UART_PORT_NUM), (uint8_t)(total_payload_length & 0xFF)); // LSB
+  uart_putc_raw(uart_get_instance(UART_PORT_NUM), (uint8_t)(total_payload_length >> 8));  // MSB
 
   sleep_ms(5); 
 
-  printf("[Slave] Sending %u bytes of compact data...\n", (unsigned)length);
+  printf("[Slave] Sending %u bytes payload (8B time + %uB data)...\n", 
+            (unsigned)total_payload_length, (unsigned)compact_length);
 
-  // 2. Send the raw binary data
-  for (uint32_t i = 0; i < length; i++) {
+  // --- 2. Send the raw binary data (8B Time + Compact Blob) ---
+  
+  // 2a. Send the 8-byte Unix time (NEW)
+  uint64_t time_val = initial_unix_time;
+  // Send Little-Endian (LSB first) for compatibility with PC systems
+  for (int i = 0; i < time_size; i++) {
+      uart_putc_raw(uart_get_instance(UART_PORT_NUM), (uint8_t)(time_val >> (i * 8)));
+  }
+
+  // 2b. Send the compact binary data (UNMODIFIED LOOP)
+  for (uint32_t i = 0; i < compact_length; i++) {
     uart_putc_raw(uart_get_instance(UART_PORT_NUM), data_ptr[i]);
   }
 
   // 3. Send the single DONE character
   uart_putc_raw(uart_get_instance(UART_PORT_NUM), DONE_CHAR);
 
-  return length;
+  return total_payload_length;
 }
 
 /* ========================================= */
@@ -305,6 +323,8 @@ static void handle_uart_state_machine(comm_state_t *state_ptr) {
         
         // Extract 8 bytes of time using memcpy
         memcpy(&base_time, &time_buf[1], sizeof(uint64_t)); 
+        // Stores the time
+        initial_unix_time = base_time;
         
         printf("[Slave] Received Unix time: %" PRIu64 "\n", base_time);
         time_t t = (time_t)base_time;

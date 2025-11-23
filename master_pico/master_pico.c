@@ -45,8 +45,12 @@
 #define ACK_EMPTY_LOG     0x40
 #define CMD_REQ_DATA      0x21
 #define CMD_SEND_DATA_HDR 0x20
+#define CMD_DUMP_HDR      0x50
+#define CMD_DUMP_TIME     0x51
+#define BINARY_DUMP_HEADER_SIZE 4
 #define BINARY_HEADER_SIZE 3 // 1 byte CMD + 2 byte Length
 #define BINARY_TIME_SIZE   9 // 1 byte CMD + 8 byte Unix time
+#define UNIX_TIME_PAYLOAD_SIZE 8 // 8 byte from slave pico time payload
 
 // -- Security Key Definition (Must match slave_pico.c) --
 #define HMAC_KEY "INF2004_TEMP_LOG_KEY"
@@ -81,6 +85,7 @@ static time_t last_ntp_time = 0;
 static absolute_time_t last_sync_time;
 static uint8_t received_data_buffer[MAX_COMPACT_DUMP_SIZE];
 static uint32_t received_data_length = 0;
+static uint64_t last_dump_unix_time = 0;
 
 // Internal prototypes
 static void print_hex(const uint8_t *b, size_t n, const char *prefix);
@@ -121,41 +126,64 @@ static void master_wipe_saved_data(void) {
     hdr.length = 0;
     flash_program_block(MASTER_DUMP_FLASH_OFFSET, &hdr, FLASH_PAGE_SIZE);
 
-    printf("[Master Wipe] SUCCESS: Data region wiped.\n");
+    printf("[Master] SUCCESS: Data region wiped.\n");
 }
 
 static void master_dump_saved_data(void) {
     if (!usb_is_connected()) {
-        printf("[Master Dump] USB not connected. Aborting dump.\n");
+        printf("[Master] USB not connected. Aborting dump.\n");
         return;
     }
+
     const master_dump_hdr_t *h = xip_hdr_master_dump();
+
     if (h->magic != MASTER_DUMP_MAGIC) {
-        printf("[Master Dump] No valid data blob found in flash (Magic: 0x%X).\n", (unsigned)h->magic);
+        printf("[Master] No valid data blob found in flash (Magic: 0x%X).\n", (unsigned)h->magic);
         usb_send("[DUMP] No valid data found in flash.\n");
         return;
     }
+
     const uint32_t length = h->length;
+    const uint64_t unix_time_val = last_dump_unix_time;
+
     if (length == 0 || length > MAX_COMPACT_DUMP_SIZE) {
-        printf("[Master Dump] Invalid data length: %u bytes.\n", (unsigned)length);
+        printf("[Master] Invalid data length: %u bytes.\n", (unsigned)length);
         usb_send("[DUMP] Invalid data length recorded.\n");
         return;
     }
-    printf("[Master Dump] Dumping %u bytes of compact data over USB...\n", (unsigned)length);
-    char info_msg[128];
-    snprintf(info_msg, sizeof(info_msg), "\n[DUMP_START] Compact blob size: %u bytes.\n", (unsigned)length);
-    usb_send(info_msg);
+    printf("[Master] DUMP START: Dumping %u bytes of compact data over USB...\n", (unsigned)length);
     
+    // Flush the buffer to push the ASCII log BEFORE the binary stream.
+    stdio_flush(); 
+    sleep_ms(100); // Increased delay to ensure the OS processes the ASCII buffer
+
+    // START NEW BINARY HEADER LOGIC
+    uint8_t header_buf[BINARY_DUMP_HEADER_SIZE];
+    header_buf[0] = CMD_DUMP_HDR;
+    header_buf[1] = (uint8_t)(length & 0xFF);    // LSB
+    header_buf[2] = (uint8_t)(length >> 8);     // MSB
+    header_buf[3] = DONE_CHAR;                  // Use DONE_CHAR as a known header-end byte
+    
+    usb_send_raw(header_buf, BINARY_DUMP_HEADER_SIZE);
+
+    if (unix_time_val > 0) {
+      uint8_t time_block[BINARY_TIME_SIZE];
+      time_block[0] = CMD_DUMP_TIME;
+      
+      memcpy(&time_block[1], &unix_time_val, sizeof(uint64_t));
+      usb_send_raw(time_block, BINARY_TIME_SIZE);
+    }
+
     const uint8_t *data_ptr = xip_data_master_dump();
     usb_send_raw(data_ptr, length);
     
-    usb_send("\n[DUMP_END] Transfer complete.\n\n");
-    printf("[Master Dump] Dump successful.\n");
+    usb_send("\n[DUMP] DUMP END: Transfer complete.\n\n");
+    printf("[Master] Dump successful.\n");
 }
 
 void master_save_compact_dump(const uint8_t *data, uint32_t length) {
     if (length == 0 || length > MAX_COMPACT_DUMP_SIZE) {
-        printf("[Master Flash] ERROR: Data length (%u) invalid or too large.\n", (unsigned)length);
+        printf("[Master] ERROR: Data length (%u) invalid or too large.\n", (unsigned)length);
         return;
     }
     flash_erase_sectors(MASTER_DUMP_FLASH_OFFSET, MASTER_DUMP_REGION_SIZE);
@@ -175,7 +203,7 @@ void master_save_compact_dump(const uint8_t *data, uint32_t length) {
         flash_program_block(dst, page, FLASH_PAGE_SIZE);
         written += (uint32_t)chunk;
     }
-    printf("[Master Flash] SUCCESS: Saved %u bytes to flash offset 0x%X.\n", (unsigned)length, (unsigned)MASTER_DUMP_FLASH_OFFSET);
+    printf("[Master] SUCCESS: Saved %u bytes to flash offset 0x%X.\n", (unsigned)length, (unsigned)MASTER_DUMP_FLASH_OFFSET);
 }
 
 
@@ -291,8 +319,6 @@ static void handle_receiving_state(comm_state_t *state_ptr) {
     uint8_t header_buf[BINARY_HEADER_SIZE];
     uint32_t expected_length = 0;
     
-    // Read Fixed Binary Header using timed read
-    // Note: Assumes uart_driver_read_timed is available in uart_driver.h/c
     size_t bytes_read = uart_driver_read_timed(header_buf, BINARY_HEADER_SIZE, TIMEOUT_MS);
 
     if (bytes_read != BINARY_HEADER_SIZE) {
@@ -308,8 +334,8 @@ static void handle_receiving_state(comm_state_t *state_ptr) {
         printf("[Master] Slave preparing to send %u bytes of compact data.\n", (unsigned)expected_length);
         received_data_length = 0; 
 
-        if (expected_length == 0) {
-            printf("[Master] Slave log empty. Returning to idle.\n");
+        if (expected_length < UNIX_TIME_PAYLOAD_SIZE) { // Check if payload is large enough for the time header
+            printf("[Master] ERROR: Expected length %u too small for 8-byte time header. Aborting.\n", (unsigned)expected_length);
             *state_ptr = STATE_IDLE;
             return;
         }
@@ -319,29 +345,47 @@ static void handle_receiving_state(comm_state_t *state_ptr) {
             return;
         }
 
-        // Read Binary Data Payload (Content to be hashed)
+        // Read Binary Data Payload (Content includes 8B time + compact data)
         received_data_length = uart_driver_read_timed(received_data_buffer, expected_length, TIMEOUT_MS);
 
         if (received_data_length == expected_length) {
             printf("[Master] SUCCESS: Received %u / %u bytes. Waiting for DONE signal.\n",
                    (unsigned)received_data_length, (unsigned)expected_length);
 
-            // Read DONE_CHAR (Tail) using timed read
+            // Read DONE_CHAR (Tail)
             uint8_t done_signal = 0;
             size_t done_read = uart_driver_read_timed(&done_signal, 1, TIMEOUT_MS); 
 
             if (done_read == 1 && done_signal == DONE_CHAR) {
                 printf("[Master] Data transfer complete and acknowledged by Slave (ACK: 0x%02X).\n", DONE_CHAR);
                 
-                // Compute HMAC on the received Payload ONLY
-                uint8_t computed_mac[HMAC_LEN];
-                hmac_sha256((const uint8_t *)HMAC_KEY, strlen(HMAC_KEY), received_data_buffer, received_data_length, computed_mac);
+                // --- TIME EXTRACTION AND SLICING LOGIC ---
                 
-                // Log the computed hash for physical comparison
+                // 1. Extract 8-byte Unix time (Little-Endian assumed)
+                uint64_t unix_time_val = 0;
+                // Copy 8 bytes from the start of the buffer
+                memcpy(&unix_time_val, received_data_buffer, UNIX_TIME_PAYLOAD_SIZE);
+                
+                // 2. Calculate the length and pointer for the Compact Data Blob
+                const uint8_t *compact_data_ptr = &received_data_buffer[UNIX_TIME_PAYLOAD_SIZE];
+                uint32_t compact_data_length = received_data_length - UNIX_TIME_PAYLOAD_SIZE;
+                
+                // 3. Log the extracted time (Human readable)
+                time_t current_time_sec = (time_t)unix_time_val;
+                printf("[Master] Extracted start time from Slave data: %s", ctime(&current_time_sec)); // Logs the time for Python script to capture
+                last_dump_unix_time = unix_time_val;
+
+                // 4. Compute HMAC on the received Compact Data Blob ONLY
+                uint8_t computed_mac[HMAC_LEN];
+                hmac_sha256((const uint8_t *)HMAC_KEY, strlen(HMAC_KEY), compact_data_ptr, compact_data_length, computed_mac);
+                
+                // Log the computed hash
                 print_hex(computed_mac, HMAC_LEN, "[Master] Calculated HMAC: ");
                 
-                // Save the received data (Payload) to internal flash
-                master_save_compact_dump(received_data_buffer, received_data_length);
+                // 5. Save the Compact Data Blob (excluding time) to internal flash
+                master_save_compact_dump(compact_data_ptr, compact_data_length);
+                
+                // --- END NEW LOGIC ---
                 
             } else {
                 printf("[Master] WARNING: Received data but no proper DONE signal. Received: 0x%02X (Count: %zu). Aborting HMAC.\n", done_signal, done_read);
@@ -357,13 +401,12 @@ static void handle_receiving_state(comm_state_t *state_ptr) {
             return;
         }
 
-    } else { // Handle unexpected header (e.g., garbage, ACK_EMPTY, or stray GET_TIME command)
+    } else {
         printf("[Master] Unexpected binary command 0x%02X. Returning to idle.\n", header_buf[0]);
         *state_ptr = STATE_IDLE;
         return;
     }
 }
-
 
 /* ========================================= */
 /* ===== 5. TASKS AND MAIN ===== */
