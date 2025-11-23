@@ -64,6 +64,9 @@
 #define MASTER_DUMP_MAGIC 0x4D534452u
 #define MAX_COMPACT_DUMP_SIZE (MASTER_DUMP_REGION_SIZE - FLASH_PAGE_SIZE)
 
+// Time when the slave last requested activation time (GET_TIME)
+static uint64_t last_activation_unix_time = 0;
+
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t length;
@@ -158,7 +161,18 @@ static void master_dump_saved_data(void) {
     // 1) Send a TIME line for the Python script
     time_t base_time = 0;
 
-    if (last_dump_unix_time != 0) {
+    // NEW: try to read Unix time from header->reserved[0..7]
+    uint64_t header_unix_time = 0;
+    memcpy(&header_unix_time, h->reserved, sizeof(uint64_t));
+
+
+    if (header_unix_time != 0 && header_unix_time != UINT64_MAX) {
+        // Preferred: time persisted in flash when dump was saved
+        base_time = (time_t)header_unix_time;
+        printf("[Master Dump] Using header activation time: %llu\n",
+               (unsigned long long)header_unix_time);
+    }
+    else if (last_dump_unix_time != 0) {
         // Use the time that came from the slave (stored when data was received)
         base_time = (time_t)last_dump_unix_time;
     } else if (last_ntp_time != 0) {
@@ -205,11 +219,21 @@ void master_save_compact_dump(const uint8_t *data, uint32_t length) {
         printf("[Master] ERROR: Data length (%u) invalid or too large.\n", (unsigned)length);
         return;
     }
+
     flash_erase_sectors(MASTER_DUMP_FLASH_OFFSET, MASTER_DUMP_REGION_SIZE);
+
     master_dump_hdr_t hdr;
     memset(&hdr, 0xFF, sizeof(hdr));
     hdr.magic = MASTER_DUMP_MAGIC;
     hdr.length = length;
+
+    // NEW: persist the activation time (if known) into header->reserved[0..7]
+    if (last_activation_unix_time != 0) {
+        memcpy(hdr.reserved, &last_activation_unix_time, sizeof(uint64_t));
+        printf("[Master] Stored activation time %llu into dump header.\n",
+               (unsigned long long)last_activation_unix_time);
+    }
+
     flash_program_block(MASTER_DUMP_FLASH_OFFSET, &hdr, FLASH_PAGE_SIZE);
 
     uint32_t written = 0;
@@ -305,6 +329,13 @@ static void handle_time_request(void) {
             current_time = last_ntp_time + (delta_ms / 1000);
         }
         xSemaphoreGive(ntp_mutex);
+
+        // --- Save activation time when slave requested GET_TIME ---
+        if (current_time > 0) {
+            last_activation_unix_time = (uint64_t)current_time;
+            printf("[Master] Saved activation time: %llu\n",
+                (unsigned long long)last_activation_unix_time);
+        }
 
         // --- 3. Send Binary Time Response (CMD + 8-byte Unix time) ---
         if (current_time > 0) {
